@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ============================================================
-#  sing-box Setup Script
-#  VLESS + REALITY Tunnel Manager
-#  Version: 1.0.0
+#  sing-box Setup & Manager v2.0.0
+#  VLESS + REALITY Tunnel
+#  Author: Mehdi Hesami
 # ============================================================
 
 set -euo pipefail
@@ -20,14 +20,18 @@ NC='\033[0m'
 
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_CONFIG="/etc/sing-box/config.json"
+USERS_DB="/etc/sing-box/users.json"
 SINGBOX_VERSION=""
+
+# ─── Helpers ──────────────────────────────────────────────
 
 print_banner() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo "  +-----------------------------------------------+"
-    echo "  |       sing-box Setup & Manager v1.0.0        |"
+    echo "  |       sing-box Setup & Manager v2.0.0        |"
     echo "  |       VLESS + REALITY Tunnel                  |"
+    echo "  |       Author: Mehdi Hesami                    |"
     echo "  +-----------------------------------------------+"
     echo -e "${NC}"
 }
@@ -206,6 +210,95 @@ select_version() {
     [[ "$ver_choice" == "2" ]] && get_latest_version prerelease || get_latest_version stable
 }
 
+# ─── Users DB ─────────────────────────────────────────────
+
+init_users_db() {
+    if [[ ! -f "$USERS_DB" ]]; then
+        echo '{"users":[]}' > "$USERS_DB"
+    fi
+}
+
+save_user_to_db() {
+    local uuid="$1" label="$2" quota_gb="$3"
+    init_users_db
+    python3 -c "
+import json, time
+with open('${USERS_DB}') as f: db=json.load(f)
+db['users'].append({
+    'uuid': '${uuid}',
+    'label': '${label}',
+    'quota_gb': ${quota_gb},
+    'used_bytes': 0,
+    'created': int(time.time()),
+    'enabled': True
+})
+with open('${USERS_DB}','w') as f: json.dump(db,f,indent=2)
+" 2>/dev/null || true
+}
+
+get_user_quota() {
+    local uuid="$1"
+    python3 -c "
+import json
+try:
+    with open('${USERS_DB}') as f: db=json.load(f)
+    for u in db.get('users',[]):
+        if u['uuid']=='${uuid}':
+            print(u.get('quota_gb',0))
+            break
+    else:
+        print(0)
+except: print(0)
+" 2>/dev/null || echo "0"
+}
+
+bytes_to_human() {
+    python3 -c "
+b=int('${1}')
+for u in ['B','KB','MB','GB','TB']:
+    if b<1024: print(f'{b:.2f} {u}'); break
+    b/=1024
+" 2>/dev/null || echo "${1} B"
+}
+
+# ─── Get server info from config ──────────────────────────
+
+get_server_info() {
+    python3 -c "
+import json
+try:
+    with open('${SINGBOX_CONFIG}') as f: c=json.load(f)
+    for ib in c.get('inbounds',[]):
+        if ib.get('type')=='vless':
+            r=ib.get('tls',{}).get('reality',{})
+            print(ib.get('listen_port',443))
+            print(ib.get('tls',{}).get('server_name','www.google.com'))
+            print(r.get('public_key',''))
+            ids=r.get('short_id',['a1b2c3d4'])
+            print(ids[0] if ids else 'a1b2c3d4')
+            break
+except: pass
+" 2>/dev/null
+}
+
+build_vless_link() {
+    local uuid="$1" label="$2"
+    local server_ip port sni public_key short_id
+    server_ip=$(curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
+    local info
+    info=$(get_server_info)
+    port=$(echo "$info" | sed -n '1p')
+    sni=$(echo "$info" | sed -n '2p')
+    public_key=$(echo "$info" | sed -n '3p')
+    short_id=$(echo "$info" | sed -n '4p')
+    port="${port:-443}"
+    sni="${sni:-www.google.com}"
+    short_id="${short_id:-a1b2c3d4}"
+    echo "vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#${label}"
+}
+
+# ─── Install: Server ──────────────────────────────────────
+
 setup_server() {
     print_banner
     echo -e "${BOLD}  Install Outbound Server (e.g. Germany)${NC}\n"
@@ -254,6 +347,9 @@ setup_server() {
   \"outbounds\": [{\"type\": \"direct\", \"tag\": \"direct\"}]
 }"
 
+    init_users_db
+    save_user_to_db "$uuid" "default" "0"
+
     print_step "5/5" "Starting service..."
     create_service_server
     open_firewall "$port"
@@ -261,19 +357,25 @@ setup_server() {
 
     local server_ip
     server_ip=$(curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
-    local vless_link="vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#Outbound-Server"
+    local vless_link
+    vless_link="vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Germany-Server"
 
     echo ""
     echo -e "${GREEN}${BOLD}+----------------------------------------------+"
     echo -e "|        Server installed successfully!        |"
     echo -e "+----------------------------------------------+${NC}"
     echo -e "\n${BOLD}Details:${NC}"
-    echo -e "  IP: ${CYAN}${server_ip}${NC}  Port: ${CYAN}${port}${NC}  UUID: ${CYAN}${uuid}${NC}"
+    echo -e "  IP: ${CYAN}${server_ip}${NC}  Port: ${CYAN}${port}${NC}"
+    echo -e "  UUID: ${CYAN}${uuid}${NC}"
     echo -e "  PublicKey: ${CYAN}${public_key}${NC}"
     echo -e "  SNI: ${CYAN}${sni}${NC}  ShortID: ${CYAN}${short_id}${NC}"
-    echo -e "\n${BOLD}VLESS link:${NC}\n  ${MAGENTA}${vless_link}${NC}\n"
+    echo ""
+    echo -e "${BOLD}VLESS link (v2rayN compatible):${NC}"
+    echo -e "  ${MAGENTA}${vless_link}${NC}\n"
     press_enter
 }
+
+# ─── Install: Client ──────────────────────────────────────
 
 setup_client() {
     print_banner
@@ -349,62 +451,26 @@ setup_client() {
     press_enter
 }
 
+# ─── Add User ─────────────────────────────────────────────
+
 add_user() {
     print_banner
-    echo -e "${BOLD}  Add New User to Server${NC}\n"
+    echo -e "${BOLD}  Add New User${NC}\n"
 
     if [[ ! -f "$SINGBOX_CONFIG" ]]; then
         print_error "Config file not found: ${SINGBOX_CONFIG}"
         press_enter; return
     fi
-
     if ! grep -q '"reality"' "$SINGBOX_CONFIG" 2>/dev/null; then
         print_error "This config is not a REALITY server."
         press_enter; return
     fi
 
-    local uuid label
+    local uuid label quota_gb
     uuid=$(generate_uuid)
-    ask uuid  "  New user UUID"   "$uuid"
-    ask label "  Label"           "New-User"
-
-    local public_key short_id sni port
-    public_key=$(python3 -c "
-import json
-with open('${SINGBOX_CONFIG}') as f: c=json.load(f)
-for ib in c.get('inbounds',[]):
-    if ib.get('type')=='vless':
-        print(ib.get('tls',{}).get('reality',{}).get('public_key',''))
-        break
-" 2>/dev/null || echo "")
-
-    short_id=$(python3 -c "
-import json
-with open('${SINGBOX_CONFIG}') as f: c=json.load(f)
-for ib in c.get('inbounds',[]):
-    if ib.get('type')=='vless':
-        ids=ib.get('tls',{}).get('reality',{}).get('short_id',['a1b2c3d4'])
-        print(ids[0] if ids else 'a1b2c3d4')
-        break
-" 2>/dev/null || echo "a1b2c3d4")
-
-    sni=$(python3 -c "
-import json
-with open('${SINGBOX_CONFIG}') as f: c=json.load(f)
-for ib in c.get('inbounds',[]):
-    if ib.get('type')=='vless':
-        print(ib.get('tls',{}).get('server_name','www.google.com'))
-        break
-" 2>/dev/null || echo "www.google.com")
-
-    port=$(python3 -c "
-import json
-with open('${SINGBOX_CONFIG}') as f: c=json.load(f)
-for ib in c.get('inbounds',[]):
-    if ib.get('type')=='vless':
-        print(ib.get('listen_port',443))
-        break
-" 2>/dev/null || echo "443")
+    ask uuid      "  New user UUID"           "$uuid"
+    ask label     "  Label (for VLESS link)"  "New-User"
+    ask quota_gb  "  Traffic quota (GB, 0=unlimited)" "0"
 
     print_info "Adding user to config..."
     local result
@@ -424,21 +490,287 @@ print('OK')
 
     case "$result" in
         DUPLICATE) print_error "This UUID already exists."; press_enter; return ;;
-        OK)        print_success "User added successfully." ;;
+        OK)        print_success "User added to config." ;;
         *)         print_error "Failed to add user."; press_enter; return ;;
     esac
 
+    save_user_to_db "$uuid" "$label" "$quota_gb"
     systemctl is-active --quiet sing-box 2>/dev/null && systemctl restart sing-box || true
 
-    local server_ip
-    server_ip=$(curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
-    local vless_link="vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp#${label}"
+    local vless_link
+    vless_link=$(build_vless_link "$uuid" "$label")
 
-    echo -e "\n${BOLD}New user:${NC}"
-    echo -e "  UUID: ${CYAN}${uuid}${NC}"
-    echo -e "\n${BOLD}VLESS link:${NC}\n  ${MAGENTA}${vless_link}${NC}\n"
+    echo ""
+    echo -e "${BOLD}New user details:${NC}"
+    echo -e "  UUID:  ${CYAN}${uuid}${NC}"
+    echo -e "  Label: ${CYAN}${label}${NC}"
+    echo -e "  Quota: ${CYAN}${quota_gb} GB${NC} (0 = unlimited)"
+    echo ""
+    echo -e "${BOLD}VLESS link (v2rayN compatible):${NC}"
+    echo -e "  ${MAGENTA}${vless_link}${NC}\n"
     press_enter
 }
+
+# ─── User Manager ─────────────────────────────────────────
+
+manage_users() {
+    while true; do
+        print_banner
+        echo -e "${BOLD}  User Manager${NC}\n"
+
+        init_users_db
+
+        # List users
+        local user_count
+        user_count=$(python3 -c "
+import json
+with open('${USERS_DB}') as f: db=json.load(f)
+print(len(db.get('users',[])))
+" 2>/dev/null || echo "0")
+
+        if [[ "$user_count" == "0" ]]; then
+            echo -e "  ${YELLOW}No users found.${NC}\n"
+        else
+            printf "  %-4s %-36s %-20s %-12s %-10s %-8s\n" "No." "UUID" "Label" "Quota" "Used" "Status"
+            echo "  $(printf '%.0s-' {1..95})"
+
+            python3 -c "
+import json, time
+with open('${USERS_DB}') as f: db=json.load(f)
+for i,u in enumerate(db.get('users',[]),1):
+    uuid=u.get('uuid','')[:36]
+    label=u.get('label','')[:20]
+    quota=u.get('quota_gb',0)
+    used=u.get('used_bytes',0)
+    enabled=u.get('enabled',True)
+    quota_str='Unlimited' if quota==0 else f'{quota} GB'
+    used_mb=used/1024/1024
+    used_str=f'{used_mb:.1f} MB' if used_mb<1024 else f'{used_mb/1024:.2f} GB'
+    status='ON' if enabled else 'OFF'
+    print(f'  {i:<4} {uuid:<36} {label:<20} {quota_str:<12} {used_str:<10} {status}')
+" 2>/dev/null
+        fi
+
+        echo ""
+        echo -e "  ${CYAN}1)${NC} View user details & VLESS link"
+        echo -e "  ${CYAN}2)${NC} Edit user quota"
+        echo -e "  ${CYAN}3)${NC} Enable / Disable user"
+        echo -e "  ${CYAN}4)${NC} Delete user"
+        echo -e "  ${CYAN}5)${NC} Reset traffic counter"
+        echo -e "  ${CYAN}0)${NC} Back"
+        echo ""
+        echo -ne "${YELLOW}Choice: ${NC}"
+        read -r choice
+
+        case "$choice" in
+            1) view_user_details ;;
+            2) edit_user_quota ;;
+            3) toggle_user ;;
+            4) delete_user ;;
+            5) reset_user_traffic ;;
+            0) return ;;
+            *) print_warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+get_user_by_index() {
+    local idx="$1"
+    python3 -c "
+import json
+with open('${USERS_DB}') as f: db=json.load(f)
+users=db.get('users',[])
+i=int('${idx}')-1
+if 0<=i<len(users):
+    u=users[i]
+    print(u.get('uuid',''))
+    print(u.get('label',''))
+    print(u.get('quota_gb',0))
+    print(u.get('used_bytes',0))
+    print(u.get('enabled',True))
+else:
+    print('INVALID')
+" 2>/dev/null
+}
+
+view_user_details() {
+    echo -ne "\n${CYAN}  Enter user number: ${NC}"
+    read -r idx
+    local info
+    info=$(get_user_by_index "$idx")
+    if [[ "$info" == "INVALID" || -z "$info" ]]; then
+        print_error "Invalid user number."; sleep 1; return
+    fi
+    local uuid label quota used enabled
+    uuid=$(echo "$info" | sed -n '1p')
+    label=$(echo "$info" | sed -n '2p')
+    quota=$(echo "$info" | sed -n '3p')
+    used=$(echo "$info" | sed -n '4p')
+    enabled=$(echo "$info" | sed -n '5p')
+
+    local vless_link
+    vless_link=$(build_vless_link "$uuid" "$label")
+
+    echo ""
+    echo -e "${BOLD}  User Details:${NC}"
+    echo -e "  UUID:    ${CYAN}${uuid}${NC}"
+    echo -e "  Label:   ${CYAN}${label}${NC}"
+    echo -e "  Quota:   ${CYAN}$([ "$quota" == "0" ] && echo "Unlimited" || echo "${quota} GB")${NC}"
+    echo -e "  Used:    ${CYAN}$(bytes_to_human "$used")${NC}"
+    echo -e "  Status:  $([ "$enabled" == "True" ] && echo "${GREEN}Enabled${NC}" || echo "${RED}Disabled${NC}")"
+    echo ""
+    echo -e "${BOLD}  VLESS link (v2rayN compatible):${NC}"
+    echo -e "  ${MAGENTA}${vless_link}${NC}"
+    press_enter
+}
+
+edit_user_quota() {
+    echo -ne "\n${CYAN}  Enter user number: ${NC}"
+    read -r idx
+    local info
+    info=$(get_user_by_index "$idx")
+    if [[ "$info" == "INVALID" || -z "$info" ]]; then
+        print_error "Invalid user number."; sleep 1; return
+    fi
+    local uuid new_quota
+    uuid=$(echo "$info" | sed -n '1p')
+    ask new_quota "  New quota in GB (0=unlimited)" "0"
+
+    python3 -c "
+import json
+with open('${USERS_DB}') as f: db=json.load(f)
+for u in db.get('users',[]):
+    if u['uuid']=='${uuid}':
+        u['quota_gb']=float('${new_quota}')
+        break
+with open('${USERS_DB}','w') as f: json.dump(db,f,indent=2)
+print('OK')
+" 2>/dev/null && print_success "Quota updated." || print_error "Failed to update quota."
+    sleep 1
+}
+
+toggle_user() {
+    echo -ne "\n${CYAN}  Enter user number: ${NC}"
+    read -r idx
+    local info
+    info=$(get_user_by_index "$idx")
+    if [[ "$info" == "INVALID" || -z "$info" ]]; then
+        print_error "Invalid user number."; sleep 1; return
+    fi
+    local uuid enabled
+    uuid=$(echo "$info" | sed -n '1p')
+    enabled=$(echo "$info" | sed -n '5p')
+
+    # Toggle in DB
+    python3 -c "
+import json
+with open('${USERS_DB}') as f: db=json.load(f)
+for u in db.get('users',[]):
+    if u['uuid']=='${uuid}':
+        u['enabled']=not u.get('enabled',True)
+        print('enabled' if u['enabled'] else 'disabled')
+        break
+with open('${USERS_DB}','w') as f: json.dump(db,f,indent=2)
+" 2>/dev/null
+
+    # Toggle in config
+    local new_state
+    if [[ "$enabled" == "True" ]]; then
+        # Disable: remove from config
+        python3 -c "
+import json
+with open('${SINGBOX_CONFIG}') as f: config=json.load(f)
+for ib in config.get('inbounds',[]):
+    if ib.get('type')=='vless':
+        ib['users']=[u for u in ib.get('users',[]) if u.get('uuid')!='${uuid}']
+        break
+with open('${SINGBOX_CONFIG}','w') as f: json.dump(config,f,indent=2)
+" 2>/dev/null
+        new_state="disabled"
+    else
+        # Enable: add back to config
+        python3 -c "
+import json
+with open('${SINGBOX_CONFIG}') as f: config=json.load(f)
+for ib in config.get('inbounds',[]):
+    if ib.get('type')=='vless':
+        users=ib.get('users',[])
+        if not any(u.get('uuid')=='${uuid}' for u in users):
+            users.append({'uuid':'${uuid}','flow':'xtls-rprx-vision'})
+        ib['users']=users
+        break
+with open('${SINGBOX_CONFIG}','w') as f: json.dump(config,f,indent=2)
+" 2>/dev/null
+        new_state="enabled"
+    fi
+
+    systemctl is-active --quiet sing-box 2>/dev/null && systemctl restart sing-box || true
+    print_success "User ${new_state}."
+    sleep 1
+}
+
+delete_user() {
+    echo -ne "\n${CYAN}  Enter user number: ${NC}"
+    read -r idx
+    local info
+    info=$(get_user_by_index "$idx")
+    if [[ "$info" == "INVALID" || -z "$info" ]]; then
+        print_error "Invalid user number."; sleep 1; return
+    fi
+    local uuid label
+    uuid=$(echo "$info" | sed -n '1p')
+    label=$(echo "$info" | sed -n '2p')
+
+    confirm "  Delete user '${label}' (${uuid:0:8}...)?" "n" || return
+
+    # Remove from config
+    python3 -c "
+import json
+with open('${SINGBOX_CONFIG}') as f: config=json.load(f)
+for ib in config.get('inbounds',[]):
+    if ib.get('type')=='vless':
+        ib['users']=[u for u in ib.get('users',[]) if u.get('uuid')!='${uuid}']
+        break
+with open('${SINGBOX_CONFIG}','w') as f: json.dump(config,f,indent=2)
+" 2>/dev/null
+
+    # Remove from DB
+    python3 -c "
+import json
+with open('${USERS_DB}') as f: db=json.load(f)
+db['users']=[u for u in db.get('users',[]) if u.get('uuid')!='${uuid}']
+with open('${USERS_DB}','w') as f: json.dump(db,f,indent=2)
+" 2>/dev/null
+
+    systemctl is-active --quiet sing-box 2>/dev/null && systemctl restart sing-box || true
+    print_success "User deleted."
+    sleep 1
+}
+
+reset_user_traffic() {
+    echo -ne "\n${CYAN}  Enter user number: ${NC}"
+    read -r idx
+    local info
+    info=$(get_user_by_index "$idx")
+    if [[ "$info" == "INVALID" || -z "$info" ]]; then
+        print_error "Invalid user number."; sleep 1; return
+    fi
+    local uuid
+    uuid=$(echo "$info" | sed -n '1p')
+
+    python3 -c "
+import json
+with open('${USERS_DB}') as f: db=json.load(f)
+for u in db.get('users',[]):
+    if u['uuid']=='${uuid}':
+        u['used_bytes']=0
+        break
+with open('${USERS_DB}','w') as f: json.dump(db,f,indent=2)
+" 2>/dev/null && print_success "Traffic counter reset." || print_error "Failed."
+    sleep 1
+}
+
+# ─── Status ───────────────────────────────────────────────
 
 show_status() {
     print_banner
@@ -467,6 +799,8 @@ show_status() {
     done
     press_enter
 }
+
+# ─── Manage Service ───────────────────────────────────────
 
 manage_service() {
     print_banner
@@ -501,6 +835,8 @@ manage_service() {
         *) print_warn "Invalid choice." ; sleep 1 ;;
     esac
 }
+
+# ─── Update ───────────────────────────────────────────────
 
 update_singbox() {
     print_banner
@@ -540,6 +876,204 @@ update_singbox() {
     press_enter
 }
 
+# ─── BBR & Network Optimization ───────────────────────────
+
+network_optimization() {
+    while true; do
+        print_banner
+        echo -e "${BOLD}  Network Optimization${NC}\n"
+
+        # BBR status
+        local current_cc bbr_status
+        current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+        local qdisc
+        qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+
+        if [[ "$current_cc" == "bbr" ]]; then
+            bbr_status="${GREEN}${BOLD}[ACTIVE]${NC} (algorithm: bbr, qdisc: ${qdisc})"
+        else
+            bbr_status="${RED}${BOLD}[INACTIVE]${NC} (current: ${current_cc})"
+        fi
+
+        # TCP buffer status
+        local rmem wmem
+        rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "0")
+        local tcp_opt_status
+        if [[ "$rmem" -gt "1000000" ]]; then
+            tcp_opt_status="${GREEN}[APPLIED]${NC}"
+        else
+            tcp_opt_status="${YELLOW}[DEFAULT]${NC}"
+        fi
+
+        echo -e "  BBR:          ${bbr_status}"
+        echo -e "  TCP Buffers:  ${tcp_opt_status}"
+        echo ""
+        echo -e "  ${CYAN}1)${NC} Enable BBR + FQ"
+        echo -e "  ${CYAN}2)${NC} Disable BBR (revert to cubic)"
+        echo -e "  ${CYAN}3)${NC} Apply TCP buffer optimization"
+        echo -e "  ${CYAN}4)${NC} Apply all optimizations (BBR + TCP)"
+        echo -e "  ${CYAN}5)${NC} Show current sysctl values"
+        echo -e "  ${CYAN}0)${NC} Back"
+        echo ""
+        echo -ne "${YELLOW}Choice: ${NC}"
+        read -r choice
+
+        case "$choice" in
+            1) enable_bbr ;;
+            2) disable_bbr ;;
+            3) apply_tcp_optimization ;;
+            4) enable_bbr; apply_tcp_optimization ;;
+            5) show_sysctl_values ;;
+            0) return ;;
+            *) print_warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+enable_bbr() {
+    print_info "Enabling BBR..."
+    # Remove old entries if exist
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p &>/dev/null
+    local result
+    result=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$result" == "bbr" ]]; then
+        print_success "BBR enabled successfully."
+    else
+        print_error "Failed to enable BBR. Kernel may not support it."
+    fi
+    press_enter
+}
+
+disable_bbr() {
+    print_info "Reverting to cubic..."
+    sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
+    sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
+    echo "net.ipv4.tcp_congestion_control=cubic" >> /etc/sysctl.conf
+    sysctl -p &>/dev/null
+    print_success "Reverted to cubic."
+    press_enter
+}
+
+apply_tcp_optimization() {
+    print_info "Applying TCP buffer optimization..."
+    # Remove old entries
+    for key in net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do
+        sed -i "/${key}/d" /etc/sysctl.conf 2>/dev/null || true
+    done
+    cat >> /etc/sysctl.conf << 'EOF'
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+EOF
+    sysctl -p &>/dev/null
+    print_success "TCP buffer optimization applied."
+    press_enter
+}
+
+show_sysctl_values() {
+    echo ""
+    echo -e "${BOLD}  Current network sysctl values:${NC}\n"
+    for key in net.ipv4.tcp_congestion_control net.core.default_qdisc \
+               net.core.rmem_max net.core.wmem_max \
+               net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do
+        local val
+        val=$(sysctl -n "$key" 2>/dev/null || echo "N/A")
+        printf "  %-45s ${CYAN}%s${NC}\n" "$key" "$val"
+    done
+    press_enter
+}
+
+# ─── Speed Test ───────────────────────────────────────────
+
+speed_test() {
+    print_banner
+    echo -e "${BOLD}  Server Speed Test${NC}\n"
+
+    # Check if speedtest-cli is available
+    if ! command -v speedtest-cli &>/dev/null && ! command -v speedtest &>/dev/null; then
+        print_warn "speedtest-cli is not installed."
+        if confirm "Install speedtest-cli now?"; then
+            apt-get update -qq && apt-get install -y speedtest-cli &>/dev/null
+            print_success "speedtest-cli installed."
+        else
+            # Fallback: use curl
+            echo -e "\n${BOLD}  Quick bandwidth test (via curl to Cloudflare):${NC}\n"
+            _curl_speed_test
+            return
+        fi
+    fi
+
+    echo -e "  ${CYAN}1)${NC} Full speed test (speedtest-cli)"
+    echo -e "  ${CYAN}2)${NC} Quick test (curl to Cloudflare)"
+    echo -e "  ${CYAN}0)${NC} Back"
+    echo ""
+    echo -ne "${YELLOW}Choice: ${NC}"
+    read -r choice
+
+    case "$choice" in
+        1)
+            echo ""
+            print_info "Running full speed test... (this may take 30-60 seconds)"
+            echo ""
+            if command -v speedtest-cli &>/dev/null; then
+                speedtest-cli 2>/dev/null || speedtest-cli --no-pre-allocate 2>/dev/null || print_error "Speed test failed."
+            else
+                speedtest 2>/dev/null || print_error "Speed test failed."
+            fi
+            press_enter
+            ;;
+        2)
+            echo ""
+            _curl_speed_test
+            ;;
+        0) return ;;
+        *) print_warn "Invalid choice."; sleep 1 ;;
+    esac
+}
+
+_curl_speed_test() {
+    local server_ip
+    server_ip=$(curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
+    echo -e "  Server IP: ${CYAN}${server_ip}${NC}\n"
+
+    echo -ne "  ${BOLD}Download (10 MB):${NC} "
+    local dl_speed
+    dl_speed=$(curl -s -o /dev/null -w "%{speed_download}" \
+        "https://speed.cloudflare.com/__down?bytes=10000000" 2>/dev/null || echo "0")
+    local dl_mbps
+    dl_mbps=$(python3 -c "print(f'{float(\"${dl_speed}\")*8/1024/1024:.2f} Mbit/s')" 2>/dev/null || echo "N/A")
+    echo -e "${GREEN}${dl_mbps}${NC}"
+
+    echo -ne "  ${BOLD}Download (50 MB):${NC} "
+    local dl_speed2
+    dl_speed2=$(curl -s -o /dev/null -w "%{speed_download}" \
+        "https://speed.cloudflare.com/__down?bytes=50000000" 2>/dev/null || echo "0")
+    local dl_mbps2
+    dl_mbps2=$(python3 -c "print(f'{float(\"${dl_speed2}\")*8/1024/1024:.2f} Mbit/s')" 2>/dev/null || echo "N/A")
+    echo -e "${GREEN}${dl_mbps2}${NC}"
+
+    echo -ne "  ${BOLD}Latency to 1.1.1.1:${NC}  "
+    local latency
+    latency=$(ping -c 3 1.1.1.1 2>/dev/null | tail -1 | awk -F '/' '{print $5}' || echo "N/A")
+    echo -e "${CYAN}${latency} ms${NC}"
+
+    echo -ne "  ${BOLD}Latency to 8.8.8.8:${NC}  "
+    local latency2
+    latency2=$(ping -c 3 8.8.8.8 2>/dev/null | tail -1 | awk -F '/' '{print $5}' || echo "N/A")
+    echo -e "${CYAN}${latency2} ms${NC}"
+    echo ""
+    press_enter
+}
+
+# ─── Uninstall ────────────────────────────────────────────
+
 uninstall() {
     print_banner
     echo -e "${RED}${BOLD}  Uninstall sing-box${NC}\n"
@@ -560,6 +1094,8 @@ uninstall() {
     press_enter
 }
 
+# ─── Main Menu ────────────────────────────────────────────
+
 main_menu() {
     while true; do
         print_banner
@@ -573,30 +1109,40 @@ main_menu() {
         echo -e "  ${CYAN}1)${NC} Install outbound server (e.g. Germany)"
         echo -e "  ${CYAN}2)${NC} Install Iran client (tunnel to outbound)"
         echo ""
-        echo -e "${BOLD}  --- Management ---${NC}"
+        echo -e "${BOLD}  --- User Management ---${NC}"
         echo -e "  ${CYAN}3)${NC} Add new user"
-        echo -e "  ${CYAN}4)${NC} Show status & logs"
-        echo -e "  ${CYAN}5)${NC} Manage service"
-        echo -e "  ${CYAN}6)${NC} Update sing-box"
-        echo -e "  ${CYAN}7)${NC} Uninstall"
+        echo -e "  ${CYAN}4)${NC} Manage users (list, view, edit, delete)"
+        echo ""
+        echo -e "${BOLD}  --- Server Management ---${NC}"
+        echo -e "  ${CYAN}5)${NC} Show status & logs"
+        echo -e "  ${CYAN}6)${NC} Manage service"
+        echo -e "  ${CYAN}7)${NC} Network optimization (BBR & TCP)"
+        echo -e "  ${CYAN}8)${NC} Speed test"
+        echo -e "  ${CYAN}9)${NC} Update sing-box"
+        echo -e "  ${CYAN}10)${NC} Uninstall"
         echo ""
         echo -e "  ${DIM}0) Exit${NC}"
         echo ""
         echo -ne "${YELLOW}Select option: ${NC}"
         read -r choice
         case "$choice" in
-            1) setup_server ;;
-            2) setup_client ;;
-            3) add_user ;;
-            4) show_status ;;
-            5) manage_service ;;
-            6) update_singbox ;;
-            7) uninstall ;;
-            0) echo -e "\n${DIM}Goodbye.${NC}\n"; exit 0 ;;
-            *) print_warn "Invalid option."; sleep 1 ;;
+            1)  setup_server ;;
+            2)  setup_client ;;
+            3)  add_user ;;
+            4)  manage_users ;;
+            5)  show_status ;;
+            6)  manage_service ;;
+            7)  network_optimization ;;
+            8)  speed_test ;;
+            9)  update_singbox ;;
+            10) uninstall ;;
+            0)  echo -e "\n${DIM}Goodbye.${NC}\n"; exit 0 ;;
+            *)  print_warn "Invalid option."; sleep 1 ;;
         esac
     done
 }
+
+# ─── Entry Point ──────────────────────────────────────────
 
 check_root
 check_os

@@ -42,6 +42,22 @@ print_error()   { echo -e "${RED}${BOLD}[ERROR]${NC} $1"; }
 print_warn()    { echo -e "${YELLOW}${BOLD}[WARN]${NC} $1"; }
 print_info()    { echo -e "${DIM}  -> $1${NC}"; }
 
+print_qr() {
+    local data="$1"
+    if ! command -v qrencode &>/dev/null; then
+        print_info "Installing qrencode for QR code display..."
+        apt-get install -y qrencode &>/dev/null && print_success "qrencode installed." || {
+            print_warn "Could not install qrencode. Skipping QR code."
+            return
+        }
+    fi
+    echo ""
+    echo -e "${BOLD}  QR Code (scan with Hiddify / v2rayN mobile):${NC}"
+    echo ""
+    qrencode -t ANSIUTF8 -m 2 "$data"
+    echo ""
+}
+
 confirm() {
     local msg="$1" default="${2:-y}" prompt
     [[ "$default" == "y" ]] && prompt="[Y/n]" || prompt="[y/N]"
@@ -371,7 +387,8 @@ setup_server() {
     echo -e "  SNI: ${CYAN}${sni}${NC}  ShortID: ${CYAN}${short_id}${NC}"
     echo ""
     echo -e "${BOLD}VLESS link (v2rayN compatible):${NC}"
-    echo -e "  ${MAGENTA}${vless_link}${NC}\n"
+    echo -e "  ${MAGENTA}${vless_link}${NC}"
+    print_qr "$vless_link"
     press_enter
 }
 
@@ -507,7 +524,8 @@ print('OK')
     echo -e "  Quota: ${CYAN}${quota_gb} GB${NC} (0 = unlimited)"
     echo ""
     echo -e "${BOLD}VLESS link (v2rayN compatible):${NC}"
-    echo -e "  ${MAGENTA}${vless_link}${NC}\n"
+    echo -e "  ${MAGENTA}${vless_link}${NC}"
+    print_qr "$vless_link"
     press_enter
 }
 
@@ -552,22 +570,24 @@ for i,u in enumerate(db.get('users',[]),1):
         fi
 
         echo ""
-        echo -e "  ${CYAN}1)${NC} View user details & VLESS link"
-        echo -e "  ${CYAN}2)${NC} Edit user quota"
-        echo -e "  ${CYAN}3)${NC} Enable / Disable user"
-        echo -e "  ${CYAN}4)${NC} Delete user"
-        echo -e "  ${CYAN}5)${NC} Reset traffic counter"
-        echo -e "  ${CYAN}0)${NC} Back"
+        echo -e "  ${CYAN}1)${NC}  Add new user"
+        echo -e "  ${CYAN}2)${NC}  View user details & VLESS link"
+        echo -e "  ${CYAN}3)${NC}  Edit user quota"
+        echo -e "  ${CYAN}4)${NC}  Enable / Disable user"
+        echo -e "  ${CYAN}5)${NC}  Delete user"
+        echo -e "  ${CYAN}6)${NC}  Reset traffic counter"
+        echo -e "  ${CYAN}0)${NC}  Back"
         echo ""
         echo -ne "${YELLOW}Choice: ${NC}"
         read -r choice
 
         case "$choice" in
-            1) view_user_details ;;
-            2) edit_user_quota ;;
-            3) toggle_user ;;
-            4) delete_user ;;
-            5) reset_user_traffic ;;
+            1) add_user ;;
+            2) view_user_details ;;
+            3) edit_user_quota ;;
+            4) toggle_user ;;
+            5) delete_user ;;
+            6) reset_user_traffic ;;
             0) return ;;
             *) print_warn "Invalid choice."; sleep 1 ;;
         esac
@@ -621,6 +641,7 @@ view_user_details() {
     echo ""
     echo -e "${BOLD}  VLESS link (v2rayN compatible):${NC}"
     echo -e "  ${MAGENTA}${vless_link}${NC}"
+    print_qr "$vless_link"
     press_enter
 }
 
@@ -1094,6 +1115,274 @@ uninstall() {
     press_enter
 }
 
+# ─── Fail2ban Management ──────────────────────────────────
+
+fail2ban_menu() {
+    while true; do
+        print_banner
+        echo -e "${BOLD}  Fail2ban - Intrusion Protection${NC}\n"
+
+        # Status
+        local f2b_installed f2b_active jail_status banned_count
+        f2b_installed=false
+        f2b_active=false
+        banned_count="0"
+
+        command -v fail2ban-client &>/dev/null && f2b_installed=true
+        if $f2b_installed && systemctl is-active --quiet fail2ban 2>/dev/null; then
+            f2b_active=true
+        fi
+
+        if $f2b_active; then
+            echo -e "  Fail2ban:  ${GREEN}${BOLD}[ACTIVE]${NC}"
+            jail_status=$(fail2ban-client status singbox 2>/dev/null || echo "")
+            if [[ -n "$jail_status" ]]; then
+                banned_count=$(echo "$jail_status" | grep "Currently banned" | awk '{print $NF}')
+                local total_banned
+                total_banned=$(echo "$jail_status" | grep "Total banned" | awk '{print $NF}')
+                echo -e "  Jail:      ${GREEN}[ACTIVE]${NC}"
+                echo -e "  Banned now: ${CYAN}${banned_count}${NC}  |  Total banned: ${CYAN}${total_banned}${NC}"
+            else
+                echo -e "  Jail:      ${YELLOW}[NOT CONFIGURED]${NC}"
+            fi
+        elif $f2b_installed; then
+            echo -e "  Fail2ban:  ${YELLOW}${BOLD}[INSTALLED / INACTIVE]${NC}"
+        else
+            echo -e "  Fail2ban:  ${RED}${BOLD}[NOT INSTALLED]${NC}"
+        fi
+
+        echo ""
+        echo -e "  ${CYAN}1)${NC}  Install & configure fail2ban for sing-box"
+        echo -e "  ${CYAN}2)${NC}  Show banned IPs"
+        echo -e "  ${CYAN}3)${NC}  Unban an IP"
+        echo -e "  ${CYAN}4)${NC}  Change ban settings (maxretry / bantime)"
+        echo -e "  ${CYAN}5)${NC}  Start / Stop fail2ban"
+        echo -e "  ${CYAN}6)${NC}  Show fail2ban log (live)"
+        echo -e "  ${CYAN}7)${NC}  Uninstall fail2ban"
+        echo -e "  ${CYAN}0)${NC}  Back"
+        echo ""
+        echo -ne "${YELLOW}Choice: ${NC}"
+        read -r choice
+
+        case "$choice" in
+            1) install_fail2ban ;;
+            2) show_banned_ips ;;
+            3) unban_ip ;;
+            4) change_ban_settings ;;
+            5) toggle_fail2ban ;;
+            6) tail -f /var/log/fail2ban.log 2>/dev/null || print_error "Log not found." ; press_enter ;;
+            7) uninstall_fail2ban ;;
+            0) return ;;
+            *) print_warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+install_fail2ban() {
+    print_banner
+    echo -e "${BOLD}  Install & Configure Fail2ban${NC}\n"
+
+    if ! command -v fail2ban-client &>/dev/null; then
+        print_info "Installing fail2ban..."
+        apt-get update -qq && apt-get install -y fail2ban &>/dev/null
+        print_success "fail2ban installed."
+    else
+        print_info "fail2ban is already installed."
+    fi
+
+    # Ask settings
+    local maxretry bantime findtime
+    ask maxretry  "  Max failed attempts before ban" "5"
+    ask findtime  "  Time window in seconds"         "60"
+    ask bantime   "  Ban duration in seconds (3600=1h, 86400=1d)" "3600"
+
+    # Write filter
+    cat > /etc/fail2ban/filter.d/singbox.conf << 'EOF'
+[Definition]
+failregex = inbound connection from <HOST>:.*REALITY: processed invalid connection
+ignoreregex =
+EOF
+
+    # Write jail
+    cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime  = ${bantime}
+findtime = ${findtime}
+maxretry = ${maxretry}
+
+[sshd]
+enabled = false
+
+[singbox]
+enabled  = true
+filter   = singbox
+logpath  = /var/log/syslog
+maxretry = ${maxretry}
+findtime = ${findtime}
+bantime  = ${bantime}
+action   = iptables-allports[name=singbox]
+EOF
+
+    systemctl enable fail2ban &>/dev/null
+    systemctl restart fail2ban
+    sleep 2
+
+    if systemctl is-active --quiet fail2ban; then
+        print_success "Fail2ban is active and protecting your server."
+        echo -e "\n  Settings:"
+        echo -e "  Max retries: ${CYAN}${maxretry}${NC} in ${CYAN}${findtime}${NC}s -> ban for ${CYAN}${bantime}${NC}s"
+    else
+        print_error "Fail2ban failed to start. Check: journalctl -u fail2ban"
+    fi
+    press_enter
+}
+
+show_banned_ips() {
+    print_banner
+    echo -e "${BOLD}  Banned IPs${NC}\n"
+
+    if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+        print_error "Fail2ban is not running."
+        press_enter; return
+    fi
+
+    local status
+    status=$(fail2ban-client status singbox 2>/dev/null || echo "")
+    if [[ -z "$status" ]]; then
+        print_warn "singbox jail is not active."
+        press_enter; return
+    fi
+
+    echo "$status"
+    echo ""
+
+    local banned_list
+    banned_list=$(fail2ban-client status singbox 2>/dev/null | grep "Banned IP" | sed 's/.*Banned IP list:\s*//')
+    if [[ -z "$banned_list" || "$banned_list" == " " ]]; then
+        echo -e "  ${GREEN}No IPs are currently banned.${NC}"
+    else
+        echo -e "  ${BOLD}Currently banned:${NC}"
+        for ip in $banned_list; do
+            echo -e "  ${RED}  $ip${NC}"
+        done
+    fi
+    press_enter
+}
+
+unban_ip() {
+    print_banner
+    echo -e "${BOLD}  Unban an IP${NC}\n"
+
+    if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+        print_error "Fail2ban is not running."
+        press_enter; return
+    fi
+
+    # Show current banned IPs first
+    local banned_list
+    banned_list=$(fail2ban-client status singbox 2>/dev/null | grep "Banned IP" | sed 's/.*Banned IP list:\s*//')
+    if [[ -z "$banned_list" || "$banned_list" == " " ]]; then
+        echo -e "  ${GREEN}No IPs are currently banned.${NC}"
+        press_enter; return
+    fi
+
+    echo -e "  ${BOLD}Currently banned IPs:${NC}"
+    for ip in $banned_list; do
+        echo -e "  ${RED}  $ip${NC}"
+    done
+
+    echo ""
+    local target_ip
+    ask target_ip "  Enter IP to unban" ""
+    if [[ -z "$target_ip" ]]; then
+        return
+    fi
+
+    if fail2ban-client set singbox unbanip "$target_ip" &>/dev/null; then
+        print_success "IP ${target_ip} has been unbanned."
+    else
+        print_error "Failed to unban ${target_ip}. Make sure IP is correct."
+    fi
+    press_enter
+}
+
+change_ban_settings() {
+    print_banner
+    echo -e "${BOLD}  Change Ban Settings${NC}\n"
+
+    # Show current settings
+    local current_maxretry current_bantime current_findtime
+    current_maxretry=$(grep "maxretry" /etc/fail2ban/jail.local 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' ' || echo "5")
+    current_bantime=$(grep "bantime" /etc/fail2ban/jail.local 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' ' || echo "3600")
+    current_findtime=$(grep "findtime" /etc/fail2ban/jail.local 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' ' || echo "60")
+
+    echo -e "  Current settings:"
+    echo -e "  Max retries: ${CYAN}${current_maxretry}${NC}"
+    echo -e "  Find time:   ${CYAN}${current_findtime}${NC}s"
+    echo -e "  Ban time:    ${CYAN}${current_bantime}${NC}s"
+    echo ""
+
+    local maxretry bantime findtime
+    ask maxretry  "  New max retries"    "$current_maxretry"
+    ask findtime  "  New find time (s)"  "$current_findtime"
+    ask bantime   "  New ban time (s)"   "$current_bantime"
+
+    cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime  = ${bantime}
+findtime = ${findtime}
+maxretry = ${maxretry}
+
+[sshd]
+enabled = false
+
+[singbox]
+enabled  = true
+filter   = singbox
+logpath  = /var/log/syslog
+maxretry = ${maxretry}
+findtime = ${findtime}
+bantime  = ${bantime}
+action   = iptables-allports[name=singbox]
+EOF
+
+    systemctl restart fail2ban
+    sleep 1
+    if systemctl is-active --quiet fail2ban; then
+        print_success "Settings updated and fail2ban restarted."
+    else
+        print_error "Fail2ban failed to restart."
+    fi
+    press_enter
+}
+
+toggle_fail2ban() {
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        systemctl stop fail2ban
+        print_success "Fail2ban stopped."
+    else
+        systemctl start fail2ban
+        sleep 1
+        if systemctl is-active --quiet fail2ban; then
+            print_success "Fail2ban started."
+        else
+            print_error "Failed to start fail2ban."
+        fi
+    fi
+    press_enter
+}
+
+uninstall_fail2ban() {
+    confirm "Remove fail2ban completely?" "n" || return
+    systemctl stop fail2ban 2>/dev/null || true
+    systemctl disable fail2ban 2>/dev/null || true
+    apt-get remove -y fail2ban &>/dev/null
+    rm -f /etc/fail2ban/jail.local
+    rm -f /etc/fail2ban/filter.d/singbox.conf
+    print_success "Fail2ban removed."
+    press_enter
+}
+
 # ─── Main Menu ────────────────────────────────────────────
 
 main_menu() {
@@ -1102,37 +1391,38 @@ main_menu() {
         local sv cl
         sv=$(systemctl is-active sing-box 2>/dev/null || echo "inactive")
         cl=$(systemctl is-active sing-box-client 2>/dev/null || echo "inactive")
-        [[ "$sv" == "active" ]] && echo -e "  Server:  ${GREEN}[ACTIVE]${NC}"
-        [[ "$cl" == "active" ]] && echo -e "  Client:  ${GREEN}[ACTIVE]${NC}"
+        local f2b
+        f2b=$(systemctl is-active fail2ban 2>/dev/null || echo "inactive")
+        [[ "$sv" == "active" ]] && echo -e "  Server:   ${GREEN}[ACTIVE]${NC}"
+        [[ "$cl" == "active" ]] && echo -e "  Client:   ${GREEN}[ACTIVE]${NC}"
+        [[ "$f2b" == "active" ]] && echo -e "  Fail2ban: ${GREEN}[ACTIVE]${NC}"
         echo ""
         echo -e "${BOLD}  --- Installation ---${NC}"
-        echo -e "  ${CYAN}1)${NC} Install outbound server (e.g. Germany)"
-        echo -e "  ${CYAN}2)${NC} Install Iran client (tunnel to outbound)"
+        echo -e "  ${CYAN}1)${NC}  Install outbound server (e.g. Germany)"
+        echo -e "  ${CYAN}2)${NC}  Install Iran client (tunnel to outbound)"
         echo ""
-        echo -e "${BOLD}  --- User Management ---${NC}"
-        echo -e "  ${CYAN}3)${NC} Add new user"
-        echo -e "  ${CYAN}4)${NC} Manage users (list, view, edit, delete)"
-        echo ""
-        echo -e "${BOLD}  --- Server Management ---${NC}"
-        echo -e "  ${CYAN}5)${NC} Show status & logs"
-        echo -e "  ${CYAN}6)${NC} Manage service"
-        echo -e "  ${CYAN}7)${NC} Network optimization (BBR & TCP)"
-        echo -e "  ${CYAN}8)${NC} Speed test"
-        echo -e "  ${CYAN}9)${NC} Update sing-box"
+        echo -e "${BOLD}  --- Management ---${NC}"
+        echo -e "  ${CYAN}3)${NC}  User management"
+        echo -e "  ${CYAN}4)${NC}  Show status & logs"
+        echo -e "  ${CYAN}5)${NC}  Manage service"
+        echo -e "  ${CYAN}6)${NC}  Network optimization (BBR & TCP)"
+        echo -e "  ${CYAN}7)${NC}  Fail2ban - intrusion protection"
+        echo -e "  ${CYAN}8)${NC}  Speed test"
+        echo -e "  ${CYAN}9)${NC}  Update sing-box"
         echo -e "  ${CYAN}10)${NC} Uninstall"
         echo ""
-        echo -e "  ${DIM}0) Exit${NC}"
+        echo -e "  ${DIM}0)  Exit${NC}"
         echo ""
         echo -ne "${YELLOW}Select option: ${NC}"
         read -r choice
         case "$choice" in
             1)  setup_server ;;
             2)  setup_client ;;
-            3)  add_user ;;
-            4)  manage_users ;;
-            5)  show_status ;;
-            6)  manage_service ;;
-            7)  network_optimization ;;
+            3)  manage_users ;;
+            4)  show_status ;;
+            5)  manage_service ;;
+            6)  network_optimization ;;
+            7)  fail2ban_menu ;;
             8)  speed_test ;;
             9)  update_singbox ;;
             10) uninstall ;;

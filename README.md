@@ -1,4 +1,4 @@
-# singbox-reality-tunnel
+# Singbox Reality Tunnel
 
 > A zero-hassle bash script to deploy and manage VLESS + REALITY tunnels using sing-box on Ubuntu/Debian servers.
 
@@ -50,7 +50,7 @@ It uses **VLESS + REALITY** protocol via [sing-box](https://github.com/SagerNet/
 ## Quick Start
 
 ```bash
-wget https://raw.githubusercontent.com/YOUR_USERNAME/singbox-reality-tunnel/main/singbox-setup.sh
+wget https://raw.githubusercontent.com/hesami/singbox-reality-tunnel/main/singbox-setup.sh
 chmod +x singbox-setup.sh
 sudo bash singbox-setup.sh
 ```

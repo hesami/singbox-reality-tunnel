@@ -111,7 +111,7 @@
 
 ```bash
 # Download and run as root
-wget -O singbox-manager.sh https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/singbox-manager.sh
+wget -O singbox-manager.sh https://raw.githubusercontent.com/hesami/singbox-reality-tunnel/main/singbox-manager.sh
 chmod +x singbox-manager.sh
 sudo bash singbox-manager.sh
 ```
@@ -119,7 +119,7 @@ sudo bash singbox-manager.sh
 Or run directly:
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/singbox-manager.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/hesami/singbox-reality-tunnel/main/singbox-manager.sh)
 ```
 
 > **Tip:** For a fresh server, run option `6 → 4 (Apply ALL optimizations)` right after installing the server.

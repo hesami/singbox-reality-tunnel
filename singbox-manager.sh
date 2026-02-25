@@ -237,16 +237,6 @@ get_ipv4() {
 }
 
 # ─── Server Info (server.json) ────────────────────────────
-# This file is the single source of truth for server settings.
-# It is created once during server installation and never changes.
-# Structure:
-# {
-#   "public_key":  "...",
-#   "private_key": "...",
-#   "short_id":    "...",
-#   "sni":         "...",
-#   "port":        443
-# }
 
 init_server_info() {
     local public_key="$1" private_key="$2" short_id="$3" sni="$4" port="$5"
@@ -267,7 +257,6 @@ with open('${SERVER_INFO}', 'w') as f:
 }
 
 read_server_info() {
-    # Returns: public_key private_key short_id sni port  (one per line)
     if [[ ! -f "$SERVER_INFO" ]]; then
         print_error "server.json not found. Is this an outbound server?"
         return 1
@@ -867,30 +856,82 @@ manage_service() {
 
 # ─── Network Optimization ─────────────────────────────────
 
+# ─── Network & System Optimization ──────────────────────
+# Main menu — shows live status summary for all subsystems
+
 network_optimization() {
     while true; do
         print_banner
-        echo -e "${BOLD}  Network Optimization${NC}\n"
-        local current_cc qdisc rmem
-        current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+        echo -e "${BOLD}  Network & System Optimization${NC}\n"
+
+        # ── Live status summary ──────────────────────────
+        local cc qdisc rmem swappiness sb_nice fd_limit jsize
+        cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
         qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
         rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "0")
-        if [[ "$current_cc" == "bbr" ]]; then
-            echo -e "  BBR:         ${GREEN}${BOLD}[ACTIVE]${NC} (qdisc: ${qdisc})"
+        swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
+        sb_nice=$(ps -eo comm,nice 2>/dev/null | awk '/^sing-box/{print $2}' | head -1)
+        [[ -z "$sb_nice" ]] && sb_nice="not running"
+        fd_limit=$(grep -E "^\*.*nofile|^root.*nofile" /etc/security/limits.conf 2>/dev/null \
+                   | awk '{print $NF}' | tail -1 || echo "default")
+        jsize=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+[KMGT]' | tail -1 || echo "?")
+
+        # Network row
+        if [[ "$cc" == "bbr" ]]; then
+            echo -e "  Network:  BBR ${GREEN}[ON]${NC}  qdisc:${qdisc}  buffers:$([ "$rmem" -gt 1000000 ] && echo "${GREEN}optimized${NC}" || echo "${YELLOW}default${NC}")"
         else
-            echo -e "  BBR:         ${RED}${BOLD}[INACTIVE]${NC} (current: ${current_cc})"
+            echo -e "  Network:  BBR ${RED}[OFF]${NC} cc:${cc}  buffers:$([ "$rmem" -gt 1000000 ] && echo "${GREEN}optimized${NC}" || echo "${YELLOW}default${NC}")"
         fi
-        if [[ "$rmem" -gt "1000000" ]]; then
-            echo -e "  TCP Buffers: ${GREEN}[OPTIMIZED]${NC}"
-        else
-            echo -e "  TCP Buffers: ${YELLOW}[DEFAULT]${NC}"
-        fi
+        # System row
+        echo -e "  System:   swappiness:${CYAN}${swappiness}${NC}  sing-box nice:${CYAN}${sb_nice}${NC}"
+        # Storage row
+        echo -e "  Storage:  journal:${CYAN}${jsize}${NC}  fd-limit:${CYAN}${fd_limit}${NC}"
+
+        echo ""
+        echo -e "  ${CYAN}1)${NC}  Network  — BBR & TCP tuning"
+        echo -e "  ${CYAN}2)${NC}  System   — Memory & CPU priority"
+        echo -e "  ${CYAN}3)${NC}  Storage  — Logging & File descriptors"
+        echo -e "  ${CYAN}──────────────────────────────────${NC}"
+        echo -e "  ${CYAN}4)${NC}  ${BOLD}Apply ALL optimizations${NC}  (recommended)"
+        echo -e "  ${CYAN}5)${NC}  Reset ALL to system defaults"
+        echo -e "  ${CYAN}0)${NC}  Back"
+        echo ""
+        echo -ne "${YELLOW}Choice: ${NC}"
+        read -r choice
+        case "$choice" in
+            1) _menu_network ;;
+            2) _menu_system ;;
+            3) _menu_storage ;;
+            4) _apply_all_optimizations ;;
+            5) _reset_all_defaults ;;
+            0) return ;;
+            *) print_warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+# ──────────────────────────────────────────────────────────
+# SUB-MENU 1 : Network — BBR & TCP
+# ──────────────────────────────────────────────────────────
+
+_menu_network() {
+    while true; do
+        print_banner
+        echo -e "${BOLD}  Network — BBR & TCP Tuning${NC}\n"
+
+        local cc qdisc rmem
+        cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+        qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+        rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "0")
+
+        echo -e "  BBR:         $([[ "$cc" == "bbr" ]] && echo "${GREEN}[ACTIVE]${NC}" || echo "${RED}[INACTIVE]${NC}")  (cc: ${cc} / qdisc: ${qdisc})"
+        echo -e "  TCP Buffers: $([[ "$rmem" -gt 1000000 ]] && echo "${GREEN}[OPTIMIZED]${NC}" || echo "${YELLOW}[DEFAULT]${NC}")"
         echo ""
         echo -e "  ${CYAN}1)${NC}  Enable BBR + FQ"
         echo -e "  ${CYAN}2)${NC}  Disable BBR (revert to cubic)"
         echo -e "  ${CYAN}3)${NC}  Apply TCP buffer optimization"
-        echo -e "  ${CYAN}4)${NC}  Apply all optimizations (BBR + TCP)"
-        echo -e "  ${CYAN}5)${NC}  Show current sysctl values"
+        echo -e "  ${CYAN}4)${NC}  Apply both (BBR + TCP buffers)"
+        echo -e "  ${CYAN}5)${NC}  Show all current network values"
         echo -e "  ${CYAN}0)${NC}  Back"
         echo ""
         echo -ne "${YELLOW}Choice: ${NC}"
@@ -908,37 +949,59 @@ network_optimization() {
 }
 
 enable_bbr() {
+    print_info "Enabling BBR congestion control..."
+    # Check if kernel supports BBR
+    if ! modprobe tcp_bbr 2>/dev/null && \
+       ! grep -q bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        print_warn "BBR module not available on this kernel. Trying anyway..."
+    fi
     sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
-    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    {
+        echo "net.core.default_qdisc=fq"
+        echo "net.ipv4.tcp_congestion_control=bbr"
+    } >> /etc/sysctl.conf
     sysctl -p &>/dev/null
-    [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]] \
-        && print_success "BBR enabled." \
-        || print_error "Failed to enable BBR."
+    local active_cc
+    active_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$active_cc" == "bbr" ]]; then
+        print_success "BBR enabled successfully. (qdisc: fq)"
+    else
+        print_error "BBR could not be activated. Active cc: ${active_cc}"
+    fi
     press_enter
 }
 
 disable_bbr() {
+    print_info "Reverting to cubic..."
     sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null || true
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
     echo "net.ipv4.tcp_congestion_control=cubic" >> /etc/sysctl.conf
     sysctl -p &>/dev/null
-    print_success "Reverted to cubic."
+    print_success "Congestion control reverted to cubic."
     press_enter
 }
 
 apply_tcp_optimization() {
-    for key in net.core.rmem_max net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do
+    print_info "Applying TCP buffer optimization for high-latency links..."
+    for key in net.core.rmem_max net.core.wmem_max \
+               net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
+               net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing \
+               net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_no_metrics_save \
+               net.ipv4.tcp_timestamps; do
         sed -i "/${key}/d" /etc/sysctl.conf 2>/dev/null || true
     done
     cat >> /etc/sysctl.conf << 'EOF'
+# sing-box TCP optimization
 net.core.rmem_max=134217728
 net.core.wmem_max=134217728
 net.ipv4.tcp_rmem=4096 87380 67108864
 net.ipv4.tcp_wmem=4096 65536 67108864
 net.ipv4.tcp_fastopen=3
 net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_no_metrics_save=1
+net.ipv4.tcp_timestamps=1
 EOF
     sysctl -p &>/dev/null
     print_success "TCP buffer optimization applied."
@@ -948,17 +1011,619 @@ EOF
 show_sysctl_values() {
     echo ""
     echo -e "${BOLD}  Current network sysctl values:${NC}\n"
-    for key in net.ipv4.tcp_congestion_control net.core.default_qdisc \
-               net.core.rmem_max net.core.wmem_max \
-               net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing; do
+    for key in net.ipv4.tcp_congestion_control \
+               net.core.default_qdisc \
+               net.core.rmem_max \
+               net.core.wmem_max \
+               net.ipv4.tcp_rmem \
+               net.ipv4.tcp_wmem \
+               net.ipv4.tcp_fastopen \
+               net.ipv4.tcp_mtu_probing \
+               net.ipv4.tcp_slow_start_after_idle \
+               net.ipv4.tcp_no_metrics_save \
+               net.ipv4.tcp_timestamps; do
         local val
         val=$(sysctl -n "$key" 2>/dev/null || echo "N/A")
-        printf "  %-45s ${CYAN}%s${NC}\n" "$key" "$val"
+        printf "  %-48s ${CYAN}%s${NC}\n" "$key" "$val"
     done
     press_enter
 }
 
+# ──────────────────────────────────────────────────────────
+# SUB-MENU 2 : System — Memory & CPU
+# ──────────────────────────────────────────────────────────
+
+_menu_system() {
+    while true; do
+        print_banner
+        echo -e "${BOLD}  System — Memory & CPU Priority${NC}\n"
+
+        local swappiness oom_adj sb_nice sb_pid
+        swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
+        sb_pid=$(pgrep -x sing-box 2>/dev/null | head -1 || echo "")
+        if [[ -n "$sb_pid" ]]; then
+            sb_nice=$(ps -o nice= -p "$sb_pid" 2>/dev/null | tr -d ' ' || echo "?")
+            oom_adj=$(cat /proc/"${sb_pid}"/oom_score_adj 2>/dev/null || echo "?")
+        else
+            sb_nice="(not running)"; oom_adj="(not running)"
+        fi
+
+        echo -e "  vm.swappiness:        ${CYAN}${swappiness}${NC}  $([ "$swappiness" -le 10 ] 2>/dev/null && echo "${GREEN}[OPTIMIZED]${NC}" || echo "${YELLOW}[DEFAULT=60]${NC}")"
+        echo -e "  sing-box nice value:  ${CYAN}${sb_nice}${NC}  $([ "$sb_nice" == "-5" ] 2>/dev/null && echo "${GREEN}[OPTIMIZED]${NC}" || echo "")"
+        echo -e "  sing-box OOM score:   ${CYAN}${oom_adj}${NC}  $([ "$oom_adj" == "-500" ] 2>/dev/null && echo "${GREEN}[PROTECTED]${NC}" || echo "")"
+        echo ""
+        echo -e "  ${CYAN}1)${NC}  Optimize swap behavior  (swappiness: 60 → 10)"
+        echo -e "  ${CYAN}2)${NC}  Set CPU priority for sing-box  (nice: -5)"
+        echo -e "  ${CYAN}3)${NC}  Protect sing-box from OOM killer"
+        echo -e "  ${CYAN}4)${NC}  Apply all system optimizations"
+        echo -e "  ${CYAN}5)${NC}  Show memory & CPU info"
+        echo -e "  ${CYAN}0)${NC}  Back"
+        echo ""
+        echo -ne "${YELLOW}Choice: ${NC}"
+        read -r choice
+        case "$choice" in
+            1) _opt_swappiness ;;
+            2) _opt_cpu_priority ;;
+            3) _opt_oom_protect ;;
+            4) _opt_swappiness; _opt_cpu_priority; _opt_oom_protect ;;
+            5) _show_system_info ;;
+            0) return ;;
+            *) print_warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+_opt_swappiness() {
+    print_info "Setting vm.swappiness to 10 (reduces RAM-to-swap eviction)..."
+    sed -i '/vm.swappiness/d' /etc/sysctl.conf 2>/dev/null || true
+    echo "vm.swappiness=10" >> /etc/sysctl.conf
+    sysctl -w vm.swappiness=10 &>/dev/null
+    print_success "swappiness set to 10. Kernel will avoid swap unless RAM is >90% used."
+
+    # Also set vfs_cache_pressure to keep filesystem cache in RAM longer
+    sed -i '/vm.vfs_cache_pressure/d' /etc/sysctl.conf 2>/dev/null || true
+    echo "vm.vfs_cache_pressure=50" >> /etc/sysctl.conf
+    sysctl -w vm.vfs_cache_pressure=50 &>/dev/null
+    print_success "vfs_cache_pressure set to 50."
+    press_enter
+}
+
+_opt_cpu_priority() {
+    print_info "Setting CPU scheduling priority for sing-box..."
+
+    # Set nice value in systemd service unit via drop-in
+    mkdir -p /etc/systemd/system/sing-box.service.d
+    cat > /etc/systemd/system/sing-box.service.d/priority.conf << 'EOF'
+[Service]
+Nice=-5
+CPUSchedulingPolicy=other
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+EOF
+    systemctl daemon-reload
+
+    # Apply to running process immediately if active
+    local sb_pid
+    sb_pid=$(pgrep -x sing-box 2>/dev/null | head -1 || echo "")
+    if [[ -n "$sb_pid" ]]; then
+        renice -n -5 -p "$sb_pid" &>/dev/null && \
+            print_success "CPU nice value set to -5 on running process (PID: ${sb_pid})." || \
+            print_warn "Could not renice running process. Will apply on next restart."
+    fi
+    print_success "CPU priority drop-in saved. sing-box will start with nice=-5 on future restarts."
+
+    # Restart to apply fully
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        print_info "Restarting sing-box to apply priority settings..."
+        systemctl restart sing-box
+        sleep 2
+        systemctl is-active --quiet sing-box && print_success "sing-box restarted." || \
+            print_error "sing-box failed to restart."
+    fi
+    press_enter
+}
+
+_opt_oom_protect() {
+    print_info "Protecting sing-box from OOM killer..."
+
+    # Set OOM score in systemd service drop-in
+    mkdir -p /etc/systemd/system/sing-box.service.d
+    # Append to existing drop-in or create new one
+    if [[ -f /etc/systemd/system/sing-box.service.d/priority.conf ]]; then
+        # Add OOMScoreAdjust to existing file if not present
+        grep -q "OOMScoreAdjust" /etc/systemd/system/sing-box.service.d/priority.conf || \
+            echo "OOMScoreAdjust=-500" >> /etc/systemd/system/sing-box.service.d/priority.conf
+    else
+        cat > /etc/systemd/system/sing-box.service.d/priority.conf << 'EOF'
+[Service]
+OOMScoreAdjust=-500
+EOF
+    fi
+    systemctl daemon-reload
+
+    # Apply to running process immediately
+    local sb_pid
+    sb_pid=$(pgrep -x sing-box 2>/dev/null | head -1 || echo "")
+    if [[ -n "$sb_pid" ]]; then
+        echo -500 > /proc/"${sb_pid}"/oom_score_adj 2>/dev/null && \
+            print_success "OOM score set to -500 on running process. sing-box is now protected." || \
+            print_warn "Could not set OOM score on running process."
+    fi
+    print_success "OOM protection drop-in saved. Will persist across restarts."
+    press_enter
+}
+
+_show_system_info() {
+    echo ""
+    echo -e "${BOLD}  Memory & CPU Info:${NC}\n"
+
+    # RAM usage
+    local total used free cached
+    read -r total used free _ cached _ < <(free -m | awk '/^Mem:/{print $2,$3,$4,$5,$6,$7}')
+    echo -e "  RAM:         Total=${CYAN}${total}MB${NC}  Used=${CYAN}${used}MB${NC}  Free=${CYAN}${free}MB${NC}  Cached=${CYAN}${cached}MB${NC}"
+
+    # Swap
+    local swap_total swap_used
+    read -r swap_total swap_used _ < <(free -m | awk '/^Swap:/{print $2,$3,$4}')
+    echo -e "  Swap:        Total=${CYAN}${swap_total}MB${NC}  Used=${CYAN}${swap_used}MB${NC}"
+
+    # CPU
+    echo -e "  CPU cores:   ${CYAN}$(nproc)${NC}"
+    local load
+    load=$(uptime | awk -F'load average:' '{print $2}' | tr -d ' ')
+    echo -e "  Load avg:    ${CYAN}${load}${NC}"
+
+    # sing-box process
+    local sb_pid
+    sb_pid=$(pgrep -x sing-box 2>/dev/null | head -1 || echo "")
+    if [[ -n "$sb_pid" ]]; then
+        local sb_mem sb_cpu sb_nice_val sb_oom
+        sb_mem=$(ps -o rss= -p "$sb_pid" 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')
+        sb_cpu=$(ps -o %cpu= -p "$sb_pid" 2>/dev/null | tr -d ' ')
+        sb_nice_val=$(ps -o nice= -p "$sb_pid" 2>/dev/null | tr -d ' ')
+        sb_oom=$(cat /proc/"${sb_pid}"/oom_score_adj 2>/dev/null || echo "?")
+        echo ""
+        echo -e "  sing-box PID:     ${CYAN}${sb_pid}${NC}"
+        echo -e "  sing-box Memory:  ${CYAN}${sb_mem}${NC}"
+        echo -e "  sing-box CPU%:    ${CYAN}${sb_cpu}%${NC}"
+        echo -e "  sing-box Nice:    ${CYAN}${sb_nice_val}${NC}"
+        echo -e "  sing-box OOM adj: ${CYAN}${sb_oom}${NC}"
+    else
+        echo -e "\n  sing-box: ${YELLOW}not running${NC}"
+    fi
+
+    echo ""
+    echo -e "  vm.swappiness:        ${CYAN}$(sysctl -n vm.swappiness 2>/dev/null)${NC}"
+    echo -e "  vm.vfs_cache_pressure:${CYAN}$(sysctl -n vm.vfs_cache_pressure 2>/dev/null)${NC}"
+    press_enter
+}
+
+# ──────────────────────────────────────────────────────────
+# SUB-MENU 3 : Storage — Logging & File Descriptors
+# ──────────────────────────────────────────────────────────
+
+_menu_storage() {
+    while true; do
+        print_banner
+        echo -e "${BOLD}  Storage — Logging & File Descriptors${NC}\n"
+
+        local jsize jmax fd_sys fd_proc sb_fd
+        jsize=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGT]' | tail -1 || echo "?")
+        jmax=$(grep "^SystemMaxUse" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 || echo "default")
+        fd_sys=$(sysctl -n fs.file-max 2>/dev/null || echo "?")
+        local sb_pid
+        sb_pid=$(pgrep -x sing-box 2>/dev/null | head -1 || echo "")
+        if [[ -n "$sb_pid" ]]; then
+            sb_fd=$(ls /proc/"${sb_pid}"/fd 2>/dev/null | wc -l || echo "?")
+        else
+            sb_fd="(not running)"
+        fi
+
+        echo -e "  Journal disk usage:  ${CYAN}${jsize}${NC}  (limit: ${CYAN}${jmax}${NC})"
+        echo -e "  System fd limit:     ${CYAN}${fd_sys}${NC}"
+        echo -e "  sing-box open fds:   ${CYAN}${sb_fd}${NC}"
+        echo ""
+        echo -e "  ${CYAN}1)${NC}  Limit journald size  (cap at 50MB, rotate aggressively)"
+        echo -e "  ${CYAN}2)${NC}  Optimize file descriptors  (raise ulimit)"
+        echo -e "  ${CYAN}3)${NC}  Apply both"
+        echo -e "  ${CYAN}4)${NC}  Show storage & fd info"
+        echo -e "  ${CYAN}0)${NC}  Back"
+        echo ""
+        echo -ne "${YELLOW}Choice: ${NC}"
+        read -r choice
+        case "$choice" in
+            1) _opt_journald ;;
+            2) _opt_file_descriptors ;;
+            3) _opt_journald; _opt_file_descriptors ;;
+            4) _show_storage_info ;;
+            0) return ;;
+            *) print_warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
+_opt_journald() {
+    print_info "Limiting journald log size to 50MB..."
+
+    # Backup original if not already backed up
+    [[ ! -f /etc/systemd/journald.conf.orig ]] && \
+        cp /etc/systemd/journald.conf /etc/systemd/journald.conf.orig 2>/dev/null || true
+
+    # Patch journald.conf
+    local conf="/etc/systemd/journald.conf"
+    for key in SystemMaxUse SystemKeepFree SystemMaxFileSize \
+               RuntimeMaxUse MaxRetentionSec MaxFileSec; do
+        sed -i "/^#*${key}/d" "$conf" 2>/dev/null || true
+    done
+    cat >> "$conf" << 'EOF'
+# sing-box optimization: keep journal small
+SystemMaxUse=50M
+SystemKeepFree=100M
+SystemMaxFileSize=10M
+RuntimeMaxUse=20M
+MaxRetentionSec=1week
+MaxFileSec=1day
+EOF
+    systemctl restart systemd-journald 2>/dev/null
+    sleep 1
+    # Vacuum immediately to reclaim existing space
+    journalctl --vacuum-size=50M &>/dev/null
+    journalctl --vacuum-time=1week &>/dev/null
+    local new_size
+    new_size=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGT][B]*' | tail -1 || echo "?")
+    print_success "journald capped at 50MB. Current usage: ${new_size}"
+    press_enter
+}
+
+_opt_file_descriptors() {
+    print_info "Raising file descriptor limits for sing-box..."
+
+    # System-wide kernel limit
+    sed -i '/fs.file-max/d' /etc/sysctl.conf 2>/dev/null || true
+    sed -i '/fs.nr_open/d' /etc/sysctl.conf 2>/dev/null || true
+    {
+        echo "fs.file-max=1048576"
+        echo "fs.nr_open=1048576"
+    } >> /etc/sysctl.conf
+    sysctl -w fs.file-max=1048576 &>/dev/null
+    sysctl -w fs.nr_open=1048576 &>/dev/null
+
+    # PAM limits for all users
+    sed -i '/nofile/d' /etc/security/limits.conf 2>/dev/null || true
+    cat >> /etc/security/limits.conf << 'EOF'
+# sing-box file descriptor optimization
+*    soft nofile 1048576
+*    hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+
+    # systemd service LimitNOFILE drop-in
+    mkdir -p /etc/systemd/system/sing-box.service.d
+    if [[ -f /etc/systemd/system/sing-box.service.d/priority.conf ]]; then
+        grep -q "LimitNOFILE" /etc/systemd/system/sing-box.service.d/priority.conf || \
+            echo "LimitNOFILE=1048576" >> /etc/systemd/system/sing-box.service.d/priority.conf
+    else
+        cat > /etc/systemd/system/sing-box.service.d/priority.conf << 'EOF'
+[Service]
+LimitNOFILE=1048576
+EOF
+    fi
+    systemctl daemon-reload
+
+    # Apply to running process if possible
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        print_info "Restarting sing-box to apply fd limits..."
+        systemctl restart sing-box
+        sleep 2
+        systemctl is-active --quiet sing-box && print_success "sing-box restarted." || \
+            print_error "sing-box failed to restart."
+    fi
+    print_success "File descriptor limit raised to 1,048,576."
+    press_enter
+}
+
+_show_storage_info() {
+    echo ""
+    echo -e "${BOLD}  Storage & File Descriptor Info:${NC}\n"
+    echo -e "  Disk usage:"
+    df -h / 2>/dev/null | awk 'NR==2{printf "    /  total=%-8s  used=%-8s  free=%s\n",$2,$3,$4}'
+    echo ""
+    echo -e "  Journal usage:  ${CYAN}$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*\S+' | tail -1)${NC}"
+    echo -e "  Journal limit:  ${CYAN}$(grep "^SystemMaxUse" /etc/systemd/journald.conf 2>/dev/null | cut -d= -f2 || echo "default")${NC}"
+    echo ""
+    echo -e "  fs.file-max:    ${CYAN}$(sysctl -n fs.file-max 2>/dev/null)${NC}"
+    echo -e "  PAM nofile:     ${CYAN}$(grep -E "^\*.*hard.*nofile" /etc/security/limits.conf 2>/dev/null | awk '{print $NF}' | tail -1 || echo "default")${NC}"
+
+    local sb_pid
+    sb_pid=$(pgrep -x sing-box 2>/dev/null | head -1 || echo "")
+    if [[ -n "$sb_pid" ]]; then
+        local hard_limit
+        hard_limit=$(cat /proc/"${sb_pid}"/limits 2>/dev/null | awk '/Max open files/{print $5}')
+        echo -e "  sing-box fd limit: ${CYAN}${hard_limit:-?}${NC}"
+        echo -e "  sing-box open fds: ${CYAN}$(ls /proc/"${sb_pid}"/fd 2>/dev/null | wc -l)${NC}"
+    fi
+    press_enter
+}
+
+# ──────────────────────────────────────────────────────────
+# Apply ALL  /  Reset ALL
+# ──────────────────────────────────────────────────────────
+
+_apply_all_optimizations() {
+    print_banner
+    echo -e "${BOLD}  Applying ALL Optimizations...${NC}\n"
+    echo -e "  This will configure: BBR, TCP buffers, swappiness,"
+    echo -e "  CPU/OOM priority, journald size, file descriptors.\n"
+
+    echo -e "${BOLD}── 1/6  BBR + FQ ──────────────────────────────────${NC}"
+    modprobe tcp_bbr 2>/dev/null || true
+    sed -i '/net.core.default_qdisc/d;/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null || true
+    printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' >> /etc/sysctl.conf
+    sysctl -p &>/dev/null
+    [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]] \
+        && print_success "BBR enabled." || print_warn "BBR could not be set (kernel may not support it)."
+
+    echo -e "\n${BOLD}── 2/6  TCP Buffers ───────────────────────────────${NC}"
+    for key in net.core.rmem_max net.core.wmem_max \
+               net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
+               net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing \
+               net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_no_metrics_save \
+               net.ipv4.tcp_timestamps; do
+        sed -i "/${key}/d" /etc/sysctl.conf 2>/dev/null || true
+    done
+    cat >> /etc/sysctl.conf << 'EOF'
+# sing-box TCP optimization
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_no_metrics_save=1
+net.ipv4.tcp_timestamps=1
+EOF
+    sysctl -p &>/dev/null
+    print_success "TCP buffers optimized."
+
+    echo -e "\n${BOLD}── 3/6  Swap & Cache ──────────────────────────────${NC}"
+    sed -i '/vm.swappiness/d;/vm.vfs_cache_pressure/d' /etc/sysctl.conf 2>/dev/null || true
+    printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\n' >> /etc/sysctl.conf
+    sysctl -w vm.swappiness=10 &>/dev/null
+    sysctl -w vm.vfs_cache_pressure=50 &>/dev/null
+    print_success "swappiness=10, vfs_cache_pressure=50."
+
+    echo -e "\n${BOLD}── 4/6  CPU & OOM Priority ────────────────────────${NC}"
+    mkdir -p /etc/systemd/system/sing-box.service.d
+    cat > /etc/systemd/system/sing-box.service.d/priority.conf << 'EOF'
+[Service]
+Nice=-5
+CPUSchedulingPolicy=other
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+OOMScoreAdjust=-500
+LimitNOFILE=1048576
+EOF
+    systemctl daemon-reload
+    local sb_pid
+    sb_pid=$(pgrep -x sing-box 2>/dev/null | head -1 || echo "")
+    if [[ -n "$sb_pid" ]]; then
+        renice -n -5 -p "$sb_pid" &>/dev/null || true
+        echo -500 > /proc/"${sb_pid}"/oom_score_adj 2>/dev/null || true
+    fi
+    print_success "CPU nice=-5, OOM protect=-500, LimitNOFILE=1048576 set."
+
+    echo -e "\n${BOLD}── 5/6  File Descriptors ──────────────────────────${NC}"
+    sed -i '/fs.file-max/d;/fs.nr_open/d' /etc/sysctl.conf 2>/dev/null || true
+    printf 'fs.file-max=1048576\nfs.nr_open=1048576\n' >> /etc/sysctl.conf
+    sysctl -w fs.file-max=1048576 &>/dev/null
+    sysctl -w fs.nr_open=1048576 &>/dev/null
+    sed -i '/nofile/d' /etc/security/limits.conf 2>/dev/null || true
+    cat >> /etc/security/limits.conf << 'EOF'
+# sing-box file descriptor optimization
+*    soft nofile 1048576
+*    hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+    print_success "File descriptor limit set to 1,048,576."
+
+    echo -e "\n${BOLD}── 6/6  Journald Size ─────────────────────────────${NC}"
+    [[ ! -f /etc/systemd/journald.conf.orig ]] && \
+        cp /etc/systemd/journald.conf /etc/systemd/journald.conf.orig 2>/dev/null || true
+    local jconf="/etc/systemd/journald.conf"
+    for key in SystemMaxUse SystemKeepFree SystemMaxFileSize \
+               RuntimeMaxUse MaxRetentionSec MaxFileSec; do
+        sed -i "/^#*${key}/d" "$jconf" 2>/dev/null || true
+    done
+    cat >> "$jconf" << 'EOF'
+# sing-box optimization
+SystemMaxUse=50M
+SystemKeepFree=100M
+SystemMaxFileSize=10M
+RuntimeMaxUse=20M
+MaxRetentionSec=1week
+MaxFileSec=1day
+EOF
+    systemctl restart systemd-journald 2>/dev/null
+    journalctl --vacuum-size=50M &>/dev/null
+    print_success "journald capped at 50MB."
+
+    # Final: restart sing-box to apply all service-level changes
+    echo ""
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        print_info "Restarting sing-box to apply all changes..."
+        systemctl restart sing-box
+        sleep 2
+        systemctl is-active --quiet sing-box \
+            && print_success "sing-box restarted successfully." \
+            || print_error "sing-box failed to restart — check logs."
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}+--------------------------------------------+"
+    echo -e "|   All optimizations applied successfully!  |"
+    echo -e "+--------------------------------------------+${NC}"
+    press_enter
+}
+
+_reset_all_defaults() {
+    print_banner
+    echo -e "${BOLD}  Reset All Settings to System Defaults${NC}\n"
+    echo -e "  ${YELLOW}This will remove all sing-box optimizations from:${NC}"
+    echo -e "  /etc/sysctl.conf, /etc/security/limits.conf,"
+    echo -e "  /etc/systemd/journald.conf, systemd drop-in files.\n"
+    confirm "Are you sure you want to reset everything?" "n" || return
+
+    # sysctl.conf — remove all blocks we added
+    print_info "Removing sysctl tweaks..."
+    for key in net.core.default_qdisc net.ipv4.tcp_congestion_control \
+               net.core.rmem_max net.core.wmem_max \
+               net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
+               net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing \
+               net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_no_metrics_save \
+               net.ipv4.tcp_timestamps \
+               vm.swappiness vm.vfs_cache_pressure \
+               fs.file-max fs.nr_open; do
+        sed -i "/${key}/d" /etc/sysctl.conf 2>/dev/null || true
+    done
+    # Remove comment markers we added
+    sed -i '/# sing-box TCP optimization/d' /etc/sysctl.conf 2>/dev/null || true
+    sed -i '/# sing-box optimization/d' /etc/sysctl.conf 2>/dev/null || true
+    sysctl -p &>/dev/null
+    print_success "sysctl.conf reset."
+
+    # limits.conf
+    print_info "Removing fd limits..."
+    sed -i '/# sing-box file descriptor optimization/d' /etc/security/limits.conf 2>/dev/null || true
+    sed -i '/nofile 1048576/d' /etc/security/limits.conf 2>/dev/null || true
+    print_success "limits.conf reset."
+
+    # journald — restore from backup if available
+    print_info "Restoring journald config..."
+    if [[ -f /etc/systemd/journald.conf.orig ]]; then
+        cp /etc/systemd/journald.conf.orig /etc/systemd/journald.conf
+        print_success "journald.conf restored from backup."
+    else
+        for key in SystemMaxUse SystemKeepFree SystemMaxFileSize \
+                   RuntimeMaxUse MaxRetentionSec MaxFileSec; do
+            sed -i "/^${key}/d" /etc/systemd/journald.conf 2>/dev/null || true
+        done
+        sed -i '/# sing-box optimization/d' /etc/systemd/journald.conf 2>/dev/null || true
+        print_success "journald.conf cleaned."
+    fi
+    systemctl restart systemd-journald 2>/dev/null
+
+    # Remove systemd drop-in
+    print_info "Removing systemd service drop-in..."
+    rm -f /etc/systemd/system/sing-box.service.d/priority.conf
+    # Remove directory only if empty
+    rmdir /etc/systemd/system/sing-box.service.d 2>/dev/null || true
+    systemctl daemon-reload
+    print_success "systemd drop-in removed."
+
+    # Restart sing-box to apply
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        print_info "Restarting sing-box..."
+        systemctl restart sing-box
+        sleep 2
+        systemctl is-active --quiet sing-box && print_success "sing-box restarted." || \
+            print_error "sing-box failed to restart."
+    fi
+
+    print_success "All settings reset to system defaults."
+    press_enter
+}
+
 # ─── Fail2ban ─────────────────────────────────────────────
+# FIX: Completely rewritten to properly handle systemd journal logging
+# sing-box writes logs to systemd journal (not /var/log/syslog)
+# Solution: use systemd backend + write sing-box logs to a dedicated file
+
+# Helper: detect the active sing-box service name
+_get_singbox_service() {
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        echo "sing-box"
+    elif systemctl is-active --quiet sing-box-client 2>/dev/null; then
+        echo "sing-box-client"
+    else
+        # Service exists but inactive — return whichever unit file is present
+        if systemctl list-unit-files sing-box.service &>/dev/null 2>&1; then
+            echo "sing-box"
+        else
+            echo "sing-box"
+        fi
+    fi
+}
+
+# Helper: configure sing-box to also write logs to a dedicated log file
+# so fail2ban can read them without needing systemd backend
+_setup_singbox_logfile() {
+    local log_dir="/var/log/sing-box"
+    local log_file="${log_dir}/sing-box.log"
+
+    # Create log directory
+    mkdir -p "$log_dir"
+    touch "$log_file"
+    chmod 640 "$log_file"
+
+    # Configure logrotate for sing-box logs
+    cat > /etc/logrotate.d/sing-box << EOF
+${log_file} {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 640 root root
+    postrotate
+        systemctl kill -s HUP sing-box 2>/dev/null || true
+        systemctl kill -s HUP sing-box-client 2>/dev/null || true
+    endscript
+}
+EOF
+
+    # Patch sing-box config to write logs to file (if config exists and server mode)
+    if [[ -f "$SINGBOX_CONFIG" ]]; then
+        python3 -c "
+import json, sys
+try:
+    with open('${SINGBOX_CONFIG}') as f:
+        config = json.load(f)
+    log_cfg = config.get('log', {})
+    log_cfg['level'] = log_cfg.get('level', 'info')
+    log_cfg['output'] = '${log_file}'
+    log_cfg['timestamp'] = True
+    config['log'] = log_cfg
+    with open('${SINGBOX_CONFIG}', 'w') as f:
+        json.dump(config, f, indent=2)
+    print('OK')
+except Exception as e:
+    print(f'WARN: {e}', file=sys.stderr)
+    print('SKIP')
+" 2>/dev/null || true
+    fi
+
+    echo "$log_file"
+}
+
+# Helper: setup rsyslog forwarding as alternative log source
+_setup_rsyslog_forward() {
+    local log_file="$1"
+    # Forward sing-box journal entries to log file via rsyslog
+    if command -v rsyslogd &>/dev/null || systemctl list-unit-files rsyslog.service &>/dev/null 2>&1; then
+        cat > /etc/rsyslog.d/50-sing-box.conf << EOF
+# Forward sing-box systemd journal entries to log file
+:programname, isequal, "sing-box" ${log_file}
+:programname, isequal, "sing-box-client" ${log_file}
+& stop
+EOF
+        systemctl restart rsyslog 2>/dev/null || true
+        print_info "rsyslog configured to forward sing-box logs."
+    fi
+}
 
 fail2ban_menu() {
     while true; do
@@ -1015,23 +1680,210 @@ fail2ban_menu() {
 install_fail2ban() {
     print_banner
     echo -e "${BOLD}  Install & Configure Fail2ban${NC}\n"
+
+    # ── Step 1: Install fail2ban ──────────────────────────
     if ! command -v fail2ban-client &>/dev/null; then
+        print_info "Updating package list..."
+        apt-get update -qq
         print_info "Installing fail2ban..."
-        apt-get update -qq && apt-get install -y fail2ban &>/dev/null
+        apt-get install -y fail2ban &>/dev/null
         print_success "fail2ban installed."
     else
         print_info "fail2ban is already installed."
     fi
+
+    # ── Step 2: Ensure rsyslog is available (needed for log file backend) ──
+    if ! command -v rsyslogd &>/dev/null; then
+        print_info "Installing rsyslog for log file support..."
+        apt-get install -y rsyslog &>/dev/null && print_success "rsyslog installed." || \
+            print_warn "rsyslog not available, will use systemd backend."
+    fi
+
+    # ── Step 3: Setup sing-box log file ──────────────────
+    print_info "Configuring sing-box log file..."
+    local log_file
+    log_file=$(_setup_singbox_logfile)
+    print_success "Log file: ${log_file}"
+
+    # Setup rsyslog forwarding as secondary source
+    _setup_rsyslog_forward "$log_file"
+
+    # Restart sing-box to apply log config changes (if running)
+    local sb_svc
+    sb_svc=$(_get_singbox_service)
+    if systemctl is-active --quiet "$sb_svc" 2>/dev/null; then
+        print_info "Restarting ${sb_svc} to apply log config..."
+        systemctl restart "$sb_svc" 2>/dev/null || true
+        sleep 2
+    fi
+
+    # ── Step 4: Ask for ban settings ─────────────────────
+    echo ""
     local maxretry bantime findtime
     ask maxretry "  Max failed attempts before ban"                  "5"
     ask findtime "  Time window in seconds"                         "60"
     ask bantime  "  Ban duration in seconds (3600=1h, 86400=1d)"   "3600"
 
+    # ── Step 5: Write fail2ban filter ────────────────────
+    print_info "Writing fail2ban filter..."
+    mkdir -p /etc/fail2ban/filter.d
     cat > /etc/fail2ban/filter.d/singbox.conf << 'EOF'
+[INCLUDES]
+before = common.conf
+
 [Definition]
-failregex = inbound connection from <HOST>:.*REALITY: processed invalid connection
+# Match REALITY invalid connection attempts (sing-box log format)
+failregex = ^.*inbound connection from <HOST>:\d+.*REALITY.*invalid.*$
+            ^.*\[.*\].*<HOST>.*connection rejected.*$
+            ^.*tls.*handshake.*failed.*<HOST>.*$
+            ^.*<HOST>.*tls.*error.*$
+
 ignoreregex =
+
+# Use ANSI date format for file-based logs
+datepattern = {^LN-BEG}%%Y/%%m/%%d %%H:%%M:%%S
+              {^LN-BEG}%%Y-%%m-%%dT%%H:%%M:%%S
+              {^LN-BEG}\[%%Y-%%m-%%d %%H:%%M:%%S\]
 EOF
+
+    # ── Step 6: Write jail config ─────────────────────────
+    print_info "Writing fail2ban jail config..."
+
+    # Determine if systemd backend is available and preferred
+    local use_systemd=false
+    local f2b_version
+    f2b_version=$(fail2ban-client version 2>/dev/null | grep -oP '\d+\.\d+' | head -1 || echo "0")
+    # Check if log file is being populated (give it a moment)
+    sleep 1
+    if [[ -s "$log_file" ]]; then
+        print_info "Using file-based log backend: ${log_file}"
+        use_systemd=false
+    else
+        print_info "Log file empty; using systemd journal backend as primary."
+        use_systemd=true
+    fi
+
+    if $use_systemd; then
+        # systemd journal backend — does NOT need a log file
+        cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime   = ${bantime}
+findtime  = ${findtime}
+maxretry  = ${maxretry}
+backend   = systemd
+
+[sshd]
+enabled = false
+
+[singbox]
+enabled   = true
+filter    = singbox
+journalmatch = _SYSTEMD_UNIT=sing-box.service + _SYSTEMD_UNIT=sing-box-client.service
+backend   = systemd
+maxretry  = ${maxretry}
+findtime  = ${findtime}
+bantime   = ${bantime}
+action    = iptables-allports[name=singbox, protocol=all]
+EOF
+    else
+        # File-based backend
+        cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime   = ${bantime}
+findtime  = ${findtime}
+maxretry  = ${maxretry}
+backend   = auto
+
+[sshd]
+enabled = false
+
+[singbox]
+enabled   = true
+filter    = singbox
+logpath   = ${log_file}
+            /var/log/syslog
+backend   = auto
+maxretry  = ${maxretry}
+findtime  = ${findtime}
+bantime   = ${bantime}
+action    = iptables-allports[name=singbox, protocol=all]
+EOF
+    fi
+
+    # ── Step 7: Validate config before starting ───────────
+    print_info "Validating fail2ban configuration..."
+    if ! fail2ban-client --test 2>/dev/null; then
+        print_warn "Config validation warning — attempting fix..."
+        # Fallback: use simplest possible systemd config
+        cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime   = ${bantime}
+findtime  = ${findtime}
+maxretry  = ${maxretry}
+
+[sshd]
+enabled = false
+
+[singbox]
+enabled   = true
+filter    = singbox
+logpath   = /var/log/syslog
+backend   = auto
+maxretry  = ${maxretry}
+findtime  = ${findtime}
+bantime   = ${bantime}
+action    = iptables-allports[name=singbox, protocol=all]
+EOF
+    fi
+
+    # ── Step 8: Enable and start fail2ban ────────────────
+    print_info "Enabling and starting fail2ban..."
+    systemctl enable fail2ban &>/dev/null
+
+    # Stop first to ensure clean start
+    systemctl stop fail2ban 2>/dev/null || true
+    sleep 1
+    systemctl start fail2ban
+
+    # Wait up to 10 seconds for fail2ban to become active
+    local retries=0
+    while [[ $retries -lt 10 ]]; do
+        sleep 1
+        if systemctl is-active --quiet fail2ban; then
+            break
+        fi
+        retries=$((retries + 1))
+    done
+
+    if systemctl is-active --quiet fail2ban; then
+        print_success "Fail2ban is active and protecting your server."
+        echo -e "\n  Max retries: ${CYAN}${maxretry}${NC} in ${CYAN}${findtime}${NC}s -> ban for ${CYAN}${bantime}${NC}s"
+        echo -e "  Log source:  ${CYAN}$(${use_systemd} && echo 'systemd journal' || echo ${log_file})${NC}"
+
+        # Show jail status
+        sleep 2
+        local jail_ok
+        jail_ok=$(fail2ban-client status singbox 2>/dev/null | grep -c "singbox" || echo "0")
+        if [[ "$jail_ok" -gt "0" ]]; then
+            print_success "singbox jail is active."
+        else
+            print_warn "singbox jail may not be fully initialized yet. Check in a few seconds."
+        fi
+    else
+        print_error "Fail2ban failed to start. Showing logs:"
+        journalctl -u fail2ban --no-pager -n 20 2>/dev/null || \
+            tail -20 /var/log/fail2ban.log 2>/dev/null || true
+        echo ""
+        print_warn "Attempting emergency fallback configuration..."
+        _fail2ban_emergency_fallback "$bantime" "$findtime" "$maxretry"
+    fi
+    press_enter
+}
+
+# Emergency fallback: absolute minimal config guaranteed to work
+_fail2ban_emergency_fallback() {
+    local bantime="${1:-3600}" findtime="${2:-60}" maxretry="${3:-5}"
+    # Write absolute minimal jail with only syslog
     cat > /etc/fail2ban/jail.local << EOF
 [DEFAULT]
 bantime  = ${bantime}
@@ -1040,26 +1892,36 @@ maxretry = ${maxretry}
 
 [sshd]
 enabled = false
+EOF
+
+    # Write simpler filter
+    cat > /etc/fail2ban/filter.d/singbox.conf << 'EOF'
+[Definition]
+failregex = inbound connection from <HOST>
+ignoreregex =
+EOF
+
+    # Try systemd backend only (no logpath needed)
+    cat >> /etc/fail2ban/jail.local << EOF
 
 [singbox]
-enabled  = true
-filter   = singbox
-logpath  = /var/log/syslog
-maxretry = ${maxretry}
-findtime = ${findtime}
-bantime  = ${bantime}
-action   = iptables-allports[name=singbox]
+enabled   = true
+filter    = singbox
+backend   = systemd
+journalmatch = _SYSTEMD_UNIT=sing-box.service
+maxretry  = ${maxretry}
+findtime  = ${findtime}
+bantime   = ${bantime}
+action    = iptables-allports[name=singbox, protocol=all]
 EOF
-    systemctl enable fail2ban &>/dev/null
-    systemctl restart fail2ban
-    sleep 2
+
+    systemctl restart fail2ban 2>/dev/null
+    sleep 3
     if systemctl is-active --quiet fail2ban; then
-        print_success "Fail2ban is active and protecting your server."
-        echo -e "\n  Max retries: ${CYAN}${maxretry}${NC} in ${CYAN}${findtime}${NC}s -> ban for ${CYAN}${bantime}${NC}s"
+        print_success "Fail2ban started with fallback configuration."
     else
-        print_error "Fail2ban failed to start."
+        print_error "Fail2ban still cannot start. Check: journalctl -u fail2ban -n 30"
     fi
-    press_enter
 }
 
 show_banned_ips() {
@@ -1119,28 +1981,64 @@ change_ban_settings() {
     ask maxretry "  New max retries"   "$cur_maxretry"
     ask findtime "  New find time (s)" "$cur_findtime"
     ask bantime  "  New ban time (s)"  "$cur_bantime"
-    cat > /etc/fail2ban/jail.local << EOF
+
+    # Preserve existing backend setting when updating
+    local current_backend
+    current_backend=$(grep "^backend" /etc/fail2ban/jail.local 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' ' || echo "auto")
+    local current_logpath
+    current_logpath=$(grep "^logpath" /etc/fail2ban/jail.local 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' ' || echo "")
+    local current_journalmatch
+    current_journalmatch=$(grep "^journalmatch" /etc/fail2ban/jail.local 2>/dev/null | tail -1 | sed 's/journalmatch\s*=\s*//' || echo "")
+
+    if [[ "$current_backend" == "systemd" ]]; then
+        cat > /etc/fail2ban/jail.local << EOF
 [DEFAULT]
-bantime  = ${bantime}
-findtime = ${findtime}
-maxretry = ${maxretry}
+bantime   = ${bantime}
+findtime  = ${findtime}
+maxretry  = ${maxretry}
+backend   = systemd
 
 [sshd]
 enabled = false
 
 [singbox]
-enabled  = true
-filter   = singbox
-logpath  = /var/log/syslog
-maxretry = ${maxretry}
-findtime = ${findtime}
-bantime  = ${bantime}
-action   = iptables-allports[name=singbox]
+enabled       = true
+filter        = singbox
+journalmatch  = ${current_journalmatch:-_SYSTEMD_UNIT=sing-box.service + _SYSTEMD_UNIT=sing-box-client.service}
+backend       = systemd
+maxretry      = ${maxretry}
+findtime      = ${findtime}
+bantime       = ${bantime}
+action        = iptables-allports[name=singbox, protocol=all]
 EOF
-    systemctl restart fail2ban; sleep 1
+    else
+        cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+bantime   = ${bantime}
+findtime  = ${findtime}
+maxretry  = ${maxretry}
+backend   = auto
+
+[sshd]
+enabled = false
+
+[singbox]
+enabled   = true
+filter    = singbox
+logpath   = ${current_logpath:-/var/log/sing-box/sing-box.log}
+            /var/log/syslog
+backend   = auto
+maxretry  = ${maxretry}
+findtime  = ${findtime}
+bantime   = ${bantime}
+action    = iptables-allports[name=singbox, protocol=all]
+EOF
+    fi
+
+    systemctl restart fail2ban; sleep 2
     systemctl is-active --quiet fail2ban \
-        && print_success "Settings updated." \
-        || print_error "Fail2ban failed to restart."
+        && print_success "Settings updated and fail2ban restarted." \
+        || print_error "Fail2ban failed to restart. Check: journalctl -u fail2ban -n 20"
     press_enter
 }
 
@@ -1148,10 +2046,13 @@ toggle_fail2ban() {
     if systemctl is-active --quiet fail2ban 2>/dev/null; then
         systemctl stop fail2ban && print_success "Fail2ban stopped."
     else
-        systemctl start fail2ban; sleep 1
+        systemctl start fail2ban; sleep 2
         systemctl is-active --quiet fail2ban \
             && print_success "Fail2ban started." \
-            || print_error "Failed to start fail2ban."
+            || {
+                print_error "Failed to start fail2ban."
+                print_info "Check logs: journalctl -u fail2ban -n 20"
+            }
     fi
     press_enter
 }
@@ -1162,6 +2063,24 @@ uninstall_fail2ban() {
     systemctl disable fail2ban 2>/dev/null || true
     apt-get remove -y fail2ban &>/dev/null
     rm -f /etc/fail2ban/jail.local /etc/fail2ban/filter.d/singbox.conf
+    rm -f /etc/rsyslog.d/50-sing-box.conf
+    rm -f /etc/logrotate.d/sing-box
+    # Remove log output from sing-box config (restore to stdout/journald)
+    if [[ -f "$SINGBOX_CONFIG" ]]; then
+        python3 -c "
+import json
+try:
+    with open('${SINGBOX_CONFIG}') as f:
+        config = json.load(f)
+    if 'log' in config and 'output' in config['log']:
+        del config['log']['output']
+    with open('${SINGBOX_CONFIG}', 'w') as f:
+        json.dump(config, f, indent=2)
+except: pass
+" 2>/dev/null || true
+    fi
+    # Restart rsyslog to remove sing-box forwarding
+    systemctl restart rsyslog 2>/dev/null || true
     print_success "Fail2ban removed."
     press_enter
 }

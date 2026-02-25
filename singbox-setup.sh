@@ -235,11 +235,13 @@ init_users_db() {
 }
 
 save_user_to_db() {
-    local uuid="$1" label="$2" quota_gb="$3"
+    local uuid="$1" label="$2" quota_gb="$3" public_key="${4:-}"
     init_users_db
     python3 -c "
 import json, time
 with open('${USERS_DB}') as f: db=json.load(f)
+if '${public_key}':
+    db['server_public_key']='${public_key}'
 db['users'].append({
     'uuid': '${uuid}',
     'label': '${label}',
@@ -281,7 +283,7 @@ for u in ['B','KB','MB','GB','TB']:
 
 get_server_info() {
     python3 -c "
-import json
+import json, subprocess
 try:
     with open('${SINGBOX_CONFIG}') as f: c=json.load(f)
     for ib in c.get('inbounds',[]):
@@ -289,7 +291,7 @@ try:
             r=ib.get('tls',{}).get('reality',{})
             print(ib.get('listen_port',443))
             print(ib.get('tls',{}).get('server_name','www.google.com'))
-            print(r.get('public_key',''))
+            print(r.get('private_key',''))
             ids=r.get('short_id',['a1b2c3d4'])
             print(ids[0] if ids else 'a1b2c3d4')
             break
@@ -297,20 +299,53 @@ except: pass
 " 2>/dev/null
 }
 
+get_public_key_from_private() {
+    local private_key="$1"
+    "$SINGBOX_BIN" generate reality-keypair 2>/dev/null | grep PublicKey | awk '{print $2}' || echo ""
+}
+
+get_ipv4() {
+    # Force IPv4 only
+    local ip
+    ip=$(curl -4 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null) \
+    || ip=$(curl -4 -s --connect-timeout 5 https://api.ipify.org 2>/dev/null) \
+    || ip=$(curl -4 -s --connect-timeout 5 https://ipv4.icanhazip.com 2>/dev/null) \
+    || ip="unknown"
+    echo "$ip"
+}
+
 build_vless_link() {
-    local uuid="$1" label="$2"
-    local server_ip port sni public_key short_id
-    server_ip=$(curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
+    local uuid="$1" label="$2" public_key_override="${3:-}"
+    local server_ip port sni private_key public_key short_id
+    server_ip=$(get_ipv4)
     local info
     info=$(get_server_info)
     port=$(echo "$info" | sed -n '1p')
     sni=$(echo "$info" | sed -n '2p')
-    public_key=$(echo "$info" | sed -n '3p')
+    private_key=$(echo "$info" | sed -n '3p')
     short_id=$(echo "$info" | sed -n '4p')
     port="${port:-443}"
     sni="${sni:-www.google.com}"
     short_id="${short_id:-a1b2c3d4}"
-    echo "vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#${label}"
+
+    # Use override if provided, otherwise derive from stored keypair in users.json
+    if [[ -n "$public_key_override" ]]; then
+        public_key="$public_key_override"
+    else
+        public_key=$(python3 -c "
+import json
+try:
+    with open('${USERS_DB}') as f: db=json.load(f)
+    print(db.get('server_public_key',''))
+except: print('')
+" 2>/dev/null || echo "")
+    fi
+
+    # URL-encode the label
+    local encoded_label
+    encoded_label=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${label}'))" 2>/dev/null || echo "$label")
+
+    echo "vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#${encoded_label}"
 }
 
 # ─── Install: Server ──────────────────────────────────────
@@ -364,7 +399,7 @@ setup_server() {
 }"
 
     init_users_db
-    save_user_to_db "$uuid" "default" "0"
+    save_user_to_db "$uuid" "default" "0" "$public_key"
 
     print_step "5/5" "Starting service..."
     create_service_server
@@ -372,9 +407,11 @@ setup_server() {
     start_service sing-box
 
     local server_ip
-    server_ip=$(curl -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
+    server_ip=$(get_ipv4)
+    local encoded_label
+    encoded_label=$(python3 -c "import urllib.parse; print(urllib.parse.quote('Germany-Server'))" 2>/dev/null || echo "Germany-Server")
     local vless_link
-    vless_link="vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Germany-Server"
+    vless_link="vless://${uuid}@${server_ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#${encoded_label}"
 
     echo ""
     echo -e "${GREEN}${BOLD}+----------------------------------------------+"
@@ -511,11 +548,21 @@ print('OK')
         *)         print_error "Failed to add user."; press_enter; return ;;
     esac
 
+    # Get stored public key
+    local public_key
+    public_key=$(python3 -c "
+import json
+try:
+    with open('${USERS_DB}') as f: db=json.load(f)
+    print(db.get('server_public_key',''))
+except: print('')
+" 2>/dev/null || echo "")
+
     save_user_to_db "$uuid" "$label" "$quota_gb"
     systemctl is-active --quiet sing-box 2>/dev/null && systemctl restart sing-box || true
 
     local vless_link
-    vless_link=$(build_vless_link "$uuid" "$label")
+    vless_link=$(build_vless_link "$uuid" "$label" "$public_key")
 
     echo ""
     echo -e "${BOLD}New user details:${NC}"
@@ -629,7 +676,15 @@ view_user_details() {
     enabled=$(echo "$info" | sed -n '5p')
 
     local vless_link
-    vless_link=$(build_vless_link "$uuid" "$label")
+    local stored_pubkey
+    stored_pubkey=$(python3 -c "
+import json
+try:
+    with open('${USERS_DB}') as f: db=json.load(f)
+    print(db.get('server_public_key',''))
+except: print('')
+" 2>/dev/null || echo "")
+    vless_link=$(build_vless_link "$uuid" "$label" "$stored_pubkey")
 
     echo ""
     echo -e "${BOLD}  User Details:${NC}"

@@ -3,14 +3,14 @@
 <h1>🔒 sing-box Setup & Manager</h1>
 
 <p>
-  <strong>A fully interactive Bash script for deploying and managing a VLESS + REALITY tunnel using <a href="https://github.com/SagerNet/sing-box">sing-box</a></strong><br/>
+  <strong>A fully interactive Bash script for deploying and managing VLESS + REALITY and Hysteria2 tunnels using <a href="https://github.com/SagerNet/sing-box">sing-box</a></strong><br/>
   Designed for the two-server bypass architecture: an <strong>outbound server</strong> (e.g. Germany) + an <strong>Iran-side client</strong>
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-2.1.0-blue?style=flat-square" alt="version"/>
+  <img src="https://img.shields.io/badge/version-2.3.0-blue?style=flat-square" alt="version"/>
   <img src="https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-orange?style=flat-square" alt="platform"/>
-  <img src="https://img.shields.io/badge/protocol-VLESS%20%2B%20REALITY-purple?style=flat-square" alt="protocol"/>
+  <img src="https://img.shields.io/badge/protocol-VLESS%20%2B%20REALITY%20%2B%20Hysteria2-purple?style=flat-square" alt="protocol"/>
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license"/>
 </p>
 
@@ -27,14 +27,15 @@
 - [Menu Reference](#-menu-reference)
   - [1. Install Outbound Server](#1-install-outbound-server)
   - [2. Install Iran Client](#2-install-iran-client)
-  - [3. User Management](#3-user-management)
-  - [4. Status & Logs](#4-status--logs)
-  - [5. Service Management](#5-service-management)
-  - [6. Network & System Optimization](#6-network--system-optimization)
-  - [7. Fail2ban — Intrusion Protection](#7-fail2ban--intrusion-protection)
-  - [8. Speed Test](#8-speed-test)
-  - [9. Update sing-box](#9-update-sing-box)
-  - [10. Uninstall](#10-uninstall)
+  - [3. Hysteria2 Setup & Performance](#3-hysteria2-setup--performance)
+  - [4. User Management](#4-user-management)
+  - [5. Status & Logs](#5-status--logs)
+  - [6. Service Management](#6-service-management)
+  - [7. Network & System Optimization](#7-network--system-optimization)
+  - [8. Fail2ban — Intrusion Protection](#8-fail2ban--intrusion-protection)
+  - [9. Speed Test](#9-speed-test)
+  - [10. Update sing-box](#10-update-sing-box)
+  - [11. Uninstall](#11-uninstall)
 - [File Structure](#-file-structure)
 - [VLESS Link Format](#-vless-link-format)
 - [Security Notes](#-security-notes)
@@ -45,13 +46,15 @@
 
 ## 🌐 Overview
 
-**sing-box Setup & Manager** is an all-in-one interactive Bash script that automates every aspect of running a VLESS + REALITY censorship-bypass tunnel. Instead of editing JSON configs by hand, you get a clean terminal menu that handles installation, user management, performance tuning, and intrusion protection — all in one place.
+**sing-box Setup & Manager** is an all-in-one interactive Bash script that automates every aspect of running VLESS + REALITY and Hysteria2 censorship-bypass tunnels. Instead of editing JSON configs by hand, you get a clean terminal menu that handles installation, user management, performance tuning, and intrusion protection — all in one place.
 
 ### ✨ Key Highlights
 
+- **Dual-protocol support** — deploy VLESS + REALITY and/or Hysteria2 tunnels on the same server
 - **One-command deployment** — installs sing-box, generates keys, writes config, creates systemd service, opens firewall
+- **Hysteria2 performance wizard** — bandwidth measurement, QUIC window profiling, interactive parameter tuning (3-step guided setup)
 - **Multi-user support** — add, remove, enable/disable users; each gets their own VLESS link + QR code
-- **Full system optimizer** — BBR, TCP buffers, swappiness, CPU priority, OOM protection, file descriptors, journald
+- **Full system optimizer** — BBR, TCP buffers, TCP keepalive, swappiness, CPU priority, OOM protection, file descriptors, journald
 - **Fail2ban integration** — auto-detects log backend (systemd journal vs file), protects against brute-force
 - **Live status dashboard** — every menu shows real-time state of all services
 - **Safe by design** — `set -euo pipefail`, all destructive actions require confirmation
@@ -138,12 +141,12 @@ Deploys sing-box as a **VLESS + REALITY inbound** on your outbound server (the o
 2. Prompts for configuration:
    - **UUID** — auto-generated, or enter your own
    - **Listen port** — default `443`
-   - **SNI** — camouflage domain (default: `www.google.com`)
-   - **Short ID** — REALITY handshake identifier
+   - **SNI** — camouflage domain (default: `www.speedtest.net` for better blending with legitimate TLS traffic)
+   - **Short ID** — REALITY handshake identifier (auto-generated as 8 hex chars)
 3. Generates a fresh REALITY **keypair** (private + public key)
 4. Writes `/etc/sing-box/config.json`
 5. Saves server info to `/etc/sing-box/server.json` (used by other menu options)
-6. Creates and enables `sing-box.service` (systemd)
+6. Creates and enables `sing-box.service` (systemd) with improved restart limits and timeout settings
 7. Opens the listen port in UFW / iptables
 8. Starts the service and verifies it is running
 9. Prints the complete **VLESS link** and shows a **terminal QR code**
@@ -174,7 +177,62 @@ Deploys sing-box as a **local SOCKS5 proxy** that tunnels traffic to the outboun
 
 ---
 
-### 3. User Management
+### 3. Hysteria2 Setup & Performance
+
+Deploys and optimizes **Hysteria2** — a high-performance QUIC-based tunnel protocol designed to bypass advanced network filtering and DPI detection.
+
+#### 3.1 — Install Hysteria2 Server
+
+Automated installation of the Hysteria2 binary and systemd service:
+
+1. Fetches the latest Hysteria2 release from GitHub (`apernet/hysteria`)
+2. Installs binary to `/usr/local/bin/hysteria`
+3. Creates `/etc/hysteria/config.yaml` and `/etc/hysteria/server.json` for server identity
+4. Configures `hysteria-server.service` systemd unit with:
+   - Improved restart behavior (`StartLimitIntervalSec=60`, `StartLimitBurst=5`)
+   - Extended stop timeout (`TimeoutStopSec=20`) for graceful shutdown
+   - Automatic restart on failure
+5. Enables and starts the service
+6. Opens the configured UDP port in the firewall
+
+#### 3.2 — Hysteria2 Performance Wizard
+
+An interactive **3-step guide** to optimize Hysteria2 for your specific hardware and network conditions:
+
+**Step 1: Bandwidth Measurement**
+- Native measurement using `curl` against Cloudflare edge servers
+- Tests both download (50 MB) and upload (10 MB) speed
+- No external speedtest tools needed — fast and reliable
+- Displays results in Mbit/s
+
+**Step 2: System Resource Analysis**
+- Detects available RAM and selects appropriate QUIC window profile:
+  - **Large** (≥4 GB): 32–128 MB windows for high-throughput servers
+  - **Medium** (2 GB): 16–64 MB windows for standard VPS
+  - **Small** (1 GB): 8–32 MB windows for resource-constrained instances
+
+**Step 3: Interactive Parameter Tuning**
+- Each parameter explained with:
+  - Description of its purpose
+  - Recommended value based on bandwidth & RAM
+  - Valid range
+  - Field to accept default or enter custom value
+
+Configurable parameters:
+| Parameter | Purpose |
+|-----------|---------|
+| `bandwidth.up` | Maximum upload Mbit/s allowed (85% of measured, rounded) |
+| `bandwidth.down` | Maximum download Mbit/s allowed |
+| `quic.initStreamReceiveWindow` | Initial stream buffer (affects ramp-up speed) |
+| `quic.maxStreamReceiveWindow` | Maximum stream buffer |
+| `quic.initConnReceiveWindow` | Initial connection buffer |
+| `quic.maxConnReceiveWindow` | Maximum connection buffer |
+| `conn.idleTimeout` | Seconds before idle connection closes |
+| `conn.keepAliveTimeout` | Keepalive interval for NAT/firewall traversal |
+
+---
+
+### 4. User Management
 
 Full lifecycle management for all VLESS users.
 
@@ -201,7 +259,7 @@ Full lifecycle management for all VLESS users.
 
 ---
 
-### 4. Status & Logs
+### 5. Status & Logs
 
 Displays a real-time overview:
 
@@ -212,7 +270,7 @@ Displays a real-time overview:
 
 ---
 
-### 5. Service Management
+### 6. Service Management
 
 Control sing-box without leaving the script:
 
@@ -226,27 +284,29 @@ Control sing-box without leaving the script:
 
 ---
 
-### 6. Network & System Optimization
+### 7. Network & System Optimization
 
 A three-level optimization suite designed to keep sing-box stable and fast on low-resource VPS servers (1 vCPU / 1 GB RAM). The top of the menu shows a **live status summary** of all subsystems.
 
 ```
-  Network:  BBR [ON]  qdisc:fq  buffers: optimized
+  Network:  BBR [ON]  qdisc:fq  buffers: optimized  keepalive: enabled
   System:   swappiness:10  sing-box nice:-5
   Storage:  journal:18.5M  fd-limit:1048576
 ```
 
-#### 6.1 — Network: BBR & TCP
+#### 7.1 — Network: BBR & TCP
 
 | Option | What it does |
 |--------|-------------|
 | **Enable BBR + FQ** | Sets `tcp_congestion_control=bbr` and `default_qdisc=fq`; checks kernel support |
 | **Disable BBR** | Reverts to `cubic` |
-| **TCP buffer optimization** | Raises `rmem_max` / `wmem_max` to 128 MB; sets `tcp_fastopen=3`, `tcp_mtu_probing=1`, `tcp_slow_start_after_idle=0`, `tcp_no_metrics_save=1` |
-| **Apply both** | BBR + TCP buffers in one step |
-| **Show values** | Prints all 11 relevant sysctl keys with current values |
+| **TCP buffer & keepalive optimization** | Raises `rmem_max` / `wmem_max` to 128 MB; sets `tcp_fastopen=3`, `tcp_mtu_probing=1`, `tcp_slow_start_after_idle=0`, `tcp_no_metrics_save=1`; enables keepalive with tuned intervals for NAT/firewall stability |
+| **Apply both** | BBR + TCP buffers & keepalive in one step |
+| **Show values** | Prints all relevant sysctl keys with current values |
 
-#### 6.2 — System: Memory & CPU Priority
+**New in v2.3.0:** TCP keepalive settings (`tcp_keepalive_time=60`, `tcp_keepalive_intvl=10`, `tcp_keepalive_probes=6`, `tcp_fin_timeout=15`) keep idle connections alive through NAT/firewall translation layers, critical for long-lived proxy connections.
+
+#### 7.2 — System: Memory & CPU Priority
 
 | Option | What it does |
 |--------|-------------|
@@ -256,7 +316,7 @@ A three-level optimization suite designed to keep sing-box stable and fast on lo
 | **Apply all system** | All three above in one step |
 | **Show info** | Live view of RAM, swap, load average, and sing-box process stats (PID, memory, CPU%, nice, OOM score) |
 
-#### 6.3 — Storage: Logging & File Descriptors
+#### 7.3 — Storage: Logging & File Descriptors
 
 | Option | What it does |
 |--------|-------------|
@@ -265,20 +325,20 @@ A three-level optimization suite designed to keep sing-box stable and fast on lo
 | **Apply both** | Journal + FD in one step |
 | **Show info** | Disk usage, journal size/limit, system fd limit, sing-box open fd count |
 
-#### 6.4 — Apply ALL Optimizations ⭐
+#### 7.4 — Apply ALL Optimizations ⭐
 
 Runs all 6 steps in sequence with progress indicators. **Recommended after a fresh server install.**
 
 ```
 ── 1/6  BBR + FQ ──────────────────
-── 2/6  TCP Buffers ───────────────
+── 2/6  TCP Buffers & Keepalive ───
 ── 3/6  Swap & Cache ──────────────
 ── 4/6  CPU & OOM Priority ────────
 ── 5/6  File Descriptors ──────────
 ── 6/6  Journald Size ─────────────
 ```
 
-#### 6.5 — Reset ALL to Defaults
+#### 7.5 — Reset ALL to Defaults
 
 Cleanly removes every optimization this script applied:
 - Strips all added lines from `/etc/sysctl.conf`
@@ -289,7 +349,7 @@ Cleanly removes every optimization this script applied:
 
 ---
 
-### 7. Fail2ban — Intrusion Protection
+### 8. Fail2ban — Intrusion Protection
 
 Protects the server from brute-force and invalid REALITY handshake attacks.
 
@@ -317,7 +377,7 @@ action   = iptables-allports (blocks all ports, not just VLESS)
 
 ---
 
-### 8. Speed Test
+### 9. Speed Test
 
 Two testing modes:
 
@@ -330,7 +390,7 @@ Two testing modes:
 
 ---
 
-### 9. Update sing-box
+### 10. Update sing-box
 
 Updates the sing-box binary in-place:
 
@@ -341,7 +401,7 @@ Updates the sing-box binary in-place:
 
 ---
 
-### 10. Uninstall
+### 11. Uninstall
 
 Completely removes all traces of sing-box:
 
@@ -359,16 +419,23 @@ Completely removes all traces of sing-box:
 
 ```
 /usr/local/bin/
-└── sing-box                         # Binary
+├── sing-box                         # Binary
+└── hysteria                         # Hysteria2 binary (if installed)
 
 /etc/sing-box/
-├── config.json                      # Running configuration (inbounds/outbounds)
+├── config.json                      # Running configuration (VLESS inbounds/outbounds)
 ├── server.json                      # Server identity (keypair, SNI, port)
 └── users.json                       # User database (uuid, label, quota, usage)
 
+/etc/hysteria/
+├── config.yaml                      # Hysteria2 server configuration
+├── server.json                      # Hysteria2 server identity
+└── tls/                             # TLS certs directory (if applicable)
+
 /etc/systemd/system/
-├── sing-box.service                 # Server systemd unit
+├── sing-box.service                 # Server systemd unit (VLESS)
 ├── sing-box-client.service          # Client systemd unit
+├── hysteria-server.service          # Hysteria2 server systemd unit (if installed)
 └── sing-box.service.d/
     └── priority.conf                # CPU/OOM/FD drop-in (created by optimizer)
 
@@ -378,7 +445,7 @@ Completely removes all traces of sing-box:
 /etc/fail2ban/
 ├── jail.local                       # Fail2ban jail config
 └── filter.d/
-    └── singbox.conf                 # Fail2ban filter for REALITY logs
+    └── singbox.conf                 # Fail2ban filter for REALITY/Hysteria2 logs
 
 /etc/logrotate.d/
 └── sing-box                         # Log rotation config
@@ -478,8 +545,8 @@ ps aux | grep sing-box
 
 **Mehdi Hesami**
 
-- Script version: `2.1.0`
-- Protocol: VLESS + REALITY ([sing-box](https://github.com/SagerNet/sing-box))
+- Script version: `2.3.0`
+- Protocols: VLESS + REALITY & Hysteria2 ([sing-box](https://github.com/SagerNet/sing-box), [Hysteria](https://github.com/apernet/hysteria))
 - Tested on: Ubuntu 22.04 LTS
 
 ---

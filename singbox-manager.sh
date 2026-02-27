@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ============================================================
-#  sing-box Setup & Manager v2.1.0
-#  VLESS + REALITY Tunnel
+#  sing-box Setup & Manager v2.3.0
+#  VLESS + REALITY + Hysteria2 Tunnel
 #  Author: Mehdi Hesami
 # ============================================================
 
@@ -24,14 +24,19 @@ SERVER_INFO="/etc/sing-box/server.json"   # keypair + server settings
 USERS_DB="/etc/sing-box/users.json"       # user list
 SINGBOX_VERSION=""
 
+# Hysteria2 paths
+HY2_BIN="/usr/local/bin/hysteria"
+HY2_CONFIG="/etc/hysteria/config.yaml"
+HY2_SERVER_INFO="/etc/hysteria/server.json"
+
 # ─── Helpers ──────────────────────────────────────────────
 
 print_banner() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo "  +-----------------------------------------------+"
-    echo "  |       sing-box Setup & Manager v2.1.0        |"
-    echo "  |       VLESS + REALITY Tunnel                  |"
+    echo "  |       sing-box Setup & Manager v2.3.0        |"
+    echo "  |       VLESS + REALITY + Hysteria2             |"
     echo "  |       Author: Mehdi Hesami                    |"
     echo "  +-----------------------------------------------+"
     echo -e "${NC}"
@@ -154,11 +159,14 @@ create_service_server() {
 [Unit]
 Description=sing-box service
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
-RestartSec=3
+RestartSec=5
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
@@ -173,12 +181,15 @@ create_service_client() {
 [Unit]
 Description=sing-box client service
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Environment=ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
-RestartSec=3
+RestartSec=5
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
@@ -337,10 +348,15 @@ setup_server() {
     echo ""
     local uuid port sni short_id
     uuid=$(generate_uuid)
+    # Generate a secure random short_id (8 hex chars)
+    local default_short_id
+    default_short_id=$(openssl rand -hex 4 2>/dev/null || cat /dev/urandom | tr -dc 'a-f0-9' | head -c 8)
+    echo -e "  ${YELLOW}[TIP] SNI should be a high-traffic TLS site to blend in with legitimate traffic.${NC}"
+    echo -e "  ${DIM}Good choices: www.speedtest.net | addons.mozilla.org | www.bing.com | dl.google.com${NC}\n"
     ask uuid     "  User UUID"             "$uuid"
     ask port     "  Listen port"           "443"
-    ask sni      "  SNI (camouflage site)" "www.google.com"
-    ask short_id "  Short ID"              "a1b2c3d4"
+    ask sni      "  SNI (camouflage site)" "www.speedtest.net"
+    ask short_id "  Short ID (hex)"        "$default_short_id"
 
     print_step "3/5" "Generating REALITY keypair..."
     local keypair private_key public_key
@@ -983,12 +999,14 @@ disable_bbr() {
 }
 
 apply_tcp_optimization() {
-    print_info "Applying TCP buffer optimization for high-latency links..."
+    print_info "Applying TCP buffer & keepalive optimization for high-latency links..."
     for key in net.core.rmem_max net.core.wmem_max \
                net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
                net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing \
                net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_no_metrics_save \
-               net.ipv4.tcp_timestamps; do
+               net.ipv4.tcp_timestamps \
+               net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl \
+               net.ipv4.tcp_keepalive_probes net.ipv4.tcp_fin_timeout; do
         sed -i "/${key}/d" /etc/sysctl.conf 2>/dev/null || true
     done
     cat >> /etc/sysctl.conf << 'EOF'
@@ -1002,9 +1020,14 @@ net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_no_metrics_save=1
 net.ipv4.tcp_timestamps=1
+# Keepalive: keep idle connections alive through NAT/firewalls
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+net.ipv4.tcp_fin_timeout=15
 EOF
     sysctl -p &>/dev/null
-    print_success "TCP buffer optimization applied."
+    print_success "TCP buffer & keepalive optimization applied."
     press_enter
 }
 
@@ -1364,12 +1387,14 @@ _apply_all_optimizations() {
     [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]] \
         && print_success "BBR enabled." || print_warn "BBR could not be set (kernel may not support it)."
 
-    echo -e "\n${BOLD}── 2/6  TCP Buffers ───────────────────────────────${NC}"
+    echo -e "\n${BOLD}── 2/6  TCP Buffers & Keepalive ───────────────────${NC}"
     for key in net.core.rmem_max net.core.wmem_max \
                net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
                net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing \
                net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_no_metrics_save \
-               net.ipv4.tcp_timestamps; do
+               net.ipv4.tcp_timestamps \
+               net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl \
+               net.ipv4.tcp_keepalive_probes net.ipv4.tcp_fin_timeout; do
         sed -i "/${key}/d" /etc/sysctl.conf 2>/dev/null || true
     done
     cat >> /etc/sysctl.conf << 'EOF'
@@ -1383,9 +1408,13 @@ net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_no_metrics_save=1
 net.ipv4.tcp_timestamps=1
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+net.ipv4.tcp_fin_timeout=15
 EOF
     sysctl -p &>/dev/null
-    print_success "TCP buffers optimized."
+    print_success "TCP buffers & keepalive optimized."
 
     echo -e "\n${BOLD}── 3/6  Swap & Cache ──────────────────────────────${NC}"
     sed -i '/vm.swappiness/d;/vm.vfs_cache_pressure/d' /etc/sysctl.conf 2>/dev/null || true
@@ -1484,6 +1513,8 @@ _reset_all_defaults() {
                net.ipv4.tcp_fastopen net.ipv4.tcp_mtu_probing \
                net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_no_metrics_save \
                net.ipv4.tcp_timestamps \
+               net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl \
+               net.ipv4.tcp_keepalive_probes net.ipv4.tcp_fin_timeout \
                vm.swappiness vm.vfs_cache_pressure \
                fs.file-max fs.nr_open; do
         sed -i "/${key}/d" /etc/sysctl.conf 2>/dev/null || true
@@ -2196,32 +2227,702 @@ uninstall() {
     press_enter
 }
 
+# ─── Hysteria2 ────────────────────────────────────────────
+
+get_latest_hy2_version() {
+    local ver
+    ver=$(curl -s "https://api.github.com/repos/apernet/hysteria/releases/latest" \
+        | grep '"tag_name"' | sed 's/.*"app\/v\([^"]*\)".*/\1/' | head -1)
+    # fallback: try without app/ prefix
+    if [[ -z "$ver" || "$ver" == *'"'* ]]; then
+        ver=$(curl -s "https://api.github.com/repos/apernet/hysteria/releases/latest" \
+            | grep '"tag_name"' | head -1 | sed 's/.*"[^/]*\/v\?\([0-9][^"]*\)".*/\1/')
+    fi
+    echo "$ver"
+}
+
+install_hysteria2_bin() {
+    local ver="$1"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    print_info "Downloading Hysteria2 v${ver}..."
+    local url="https://github.com/apernet/hysteria/releases/download/app%2Fv${ver}/hysteria-linux-amd64"
+    if ! curl -L --progress-bar -o "${tmp_dir}/hysteria" "$url"; then
+        print_error "Download failed. Check version or network."
+        rm -rf "$tmp_dir"; return 1
+    fi
+    mv "${tmp_dir}/hysteria" "$HY2_BIN"
+    chmod +x "$HY2_BIN"
+    rm -rf "$tmp_dir"
+    mkdir -p /etc/hysteria
+    print_success "Hysteria2 v${ver} installed at ${HY2_BIN}."
+}
+
+create_hy2_service_server() {
+    cat > /etc/systemd/system/hysteria-server.service << 'EOF'
+[Unit]
+Description=Hysteria2 Server
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable hysteria-server &>/dev/null
+    print_success "Service hysteria-server created and enabled."
+}
+
+# ─── Hysteria2 Performance Helpers ───────────────────────
+
+# Measure download speed using curl against Cloudflare's speed endpoint (no external tools needed)
+hy2_measure_bandwidth() {
+    echo -e "\n${BOLD}  Measuring server bandwidth (native, no external tools)...${NC}"
+    echo -e "  ${DIM}Downloading test data from Cloudflare edge — please wait (~15s)${NC}\n"
+
+    # Download test: 50 MB from Cloudflare
+    local dl_bps
+    dl_bps=$(curl -4 -s -o /dev/null -w "%{speed_download}" \
+        --max-time 12 \
+        "https://speed.cloudflare.com/__down?bytes=52428800" 2>/dev/null || echo "0")
+
+    # Upload test: POST 10 MB of zeros to Cloudflare
+    local ul_bps
+    ul_bps=$(dd if=/dev/zero bs=1M count=10 2>/dev/null \
+        | curl -4 -s -o /dev/null -w "%{speed_upload}" \
+            --max-time 12 -X POST \
+            --data-binary @- \
+            "https://speed.cloudflare.com/__up" 2>/dev/null || echo "0")
+
+    # Convert bytes/s → Mbit/s
+    local dl_mbit ul_mbit
+    dl_mbit=$(python3 -c "v=float('${dl_bps}'); print(f'{v*8/1_000_000:.1f}')" 2>/dev/null || echo "0")
+    ul_mbit=$(python3 -c "v=float('${ul_bps}'); print(f'{v*8/1_000_000:.1f}')" 2>/dev/null || echo "0")
+
+    # Sanity check — if zero, fallback to a conservative estimate
+    if [[ "$dl_mbit" == "0" || "$dl_mbit" == "0.0" ]]; then
+        print_warn "Download measurement returned 0 — using conservative fallback (100 Mbit/s)."
+        dl_mbit="100.0"
+    fi
+    if [[ "$ul_mbit" == "0" || "$ul_mbit" == "0.0" ]]; then
+        print_warn "Upload measurement returned 0 — using conservative fallback (100 Mbit/s)."
+        ul_mbit="100.0"
+    fi
+
+    echo -e "  ${BOLD}Results:${NC}"
+    echo -e "    Download : ${GREEN}${dl_mbit} Mbit/s${NC}"
+    echo -e "    Upload   : ${GREEN}${ul_mbit} Mbit/s${NC}"
+
+    # Export results
+    HY2_MEASURED_DL="$dl_mbit"
+    HY2_MEASURED_UL="$ul_mbit"
+}
+
+# Calculate recommended bandwidth (85% of measured, rounded to nearest 10)
+hy2_recommended_bw() {
+    local measured="$1"
+    python3 -c "
+v = float('${measured}') * 0.85
+# round to nearest 10, minimum 10
+v = max(10, round(v / 10) * 10)
+print(int(v))
+" 2>/dev/null || echo "100"
+}
+
+# Calculate QUIC window profile based on available RAM
+hy2_quic_profile() {
+    local ram_mb
+    ram_mb=$(free -m | awk '/^Mem:/{print $2}')
+
+    local init_stream max_stream init_conn max_conn profile_name
+
+    if   [[ "$ram_mb" -ge 3800 ]]; then
+        profile_name="Large  (≥4 GB RAM)"
+        init_stream=33554432   # 32 MB
+        max_stream=67108864    # 64 MB
+        init_conn=67108864     # 64 MB
+        max_conn=134217728     # 128 MB
+    elif [[ "$ram_mb" -ge 1800 ]]; then
+        profile_name="Medium (2 GB RAM)"
+        init_stream=16777216   # 16 MB
+        max_stream=33554432    # 32 MB
+        init_conn=33554432     # 32 MB
+        max_conn=67108864      # 64 MB
+    else
+        profile_name="Small  (1 GB RAM)"
+        init_stream=8388608    # 8 MB
+        max_stream=16777216    # 16 MB
+        init_conn=16777216     # 16 MB
+        max_conn=33554432      # 32 MB
+    fi
+
+    echo "${profile_name}|${init_stream}|${max_stream}|${init_conn}|${max_conn}|${ram_mb}"
+}
+
+# Interactive parameter wizard — shows every param with explanation, suggested value, and range
+hy2_optimize_wizard() {
+    local skip_measure="${1:-no}"   # pass "skip" to reuse already-measured values
+
+    print_banner
+    echo -e "${BOLD}  Hysteria2 — Performance Optimization Wizard${NC}"
+    echo -e "  ${DIM}Each parameter will be explained with a suggested value based on your hardware.${NC}\n"
+
+    if [[ ! -f "$HY2_CONFIG" ]]; then
+        print_error "Hysteria2 config not found at ${HY2_CONFIG}. Install Hysteria2 first."
+        press_enter; return 1
+    fi
+
+    # ── Step 1: Bandwidth measurement ─────────────────────
+    echo -e "${BOLD}  ── Step 1/3 : Bandwidth Measurement ──────────────────────${NC}"
+    if [[ "$skip_measure" == "skip" && -n "$HY2_MEASURED_DL" ]]; then
+        echo -e "  ${DIM}Using previously measured values.${NC}"
+        echo -e "    Download : ${GREEN}${HY2_MEASURED_DL} Mbit/s${NC}"
+        echo -e "    Upload   : ${GREEN}${HY2_MEASURED_UL} Mbit/s${NC}"
+    else
+        hy2_measure_bandwidth
+    fi
+
+    local rec_dl rec_ul
+    rec_dl=$(hy2_recommended_bw "$HY2_MEASURED_DL")
+    rec_ul=$(hy2_recommended_bw "$HY2_MEASURED_UL")
+
+    # ── Step 2: QUIC profile ───────────────────────────────
+    echo -e "\n${BOLD}  ── Step 2/3 : System Resource Analysis ────────────────────${NC}"
+    local quic_raw profile_name init_stream max_stream init_conn max_conn ram_mb
+    quic_raw=$(hy2_quic_profile)
+    IFS='|' read -r profile_name init_stream max_stream init_conn max_conn ram_mb <<< "$quic_raw"
+    echo -e "  RAM detected : ${CYAN}${ram_mb} MB${NC}"
+    echo -e "  QUIC profile : ${GREEN}${profile_name}${NC}"
+
+    # ── Step 3: Interactive parameter confirmation ─────────
+    echo -e "\n${BOLD}  ── Step 3/3 : Parameter Configuration ─────────────────────${NC}"
+    echo -e "  ${DIM}Review each parameter. Press Enter to accept the suggested value, or type your own.${NC}\n"
+
+    local final_ul final_dl final_init_stream final_max_stream final_init_conn final_max_conn
+    local final_idle_timeout final_keepalive
+
+    # ── bandwidth.up ──
+    echo -e "  ${CYAN}${BOLD}[ bandwidth.up ]${NC}"
+    echo -e "  ${DIM}How much upload bandwidth Hysteria2 is allowed to use on this server.${NC}"
+    echo -e "  ${DIM}Set slightly below the measured max to leave headroom for stability.${NC}"
+    echo -e "  ${DIM}Range: 10 – 10000 Mbit/s   |   Measured: ${HY2_MEASURED_UL} Mbit/s${NC}"
+    echo -ne "  ${YELLOW}Suggested [${rec_ul} mbps]: ${NC}"
+    read -r inp; inp="${inp:-${rec_ul}}"
+    # strip non-numeric suffix if user typed "200 mbps"
+    inp=$(echo "$inp" | grep -oP '^\d+')
+    final_ul="${inp:-$rec_ul}"
+    echo ""
+
+    # ── bandwidth.down ──
+    echo -e "  ${CYAN}${BOLD}[ bandwidth.down ]${NC}"
+    echo -e "  ${DIM}How much download bandwidth Hysteria2 is allowed to use on this server.${NC}"
+    echo -e "  ${DIM}Clients use this to throttle their requests — keep it realistic.${NC}"
+    echo -e "  ${DIM}Range: 10 – 10000 Mbit/s   |   Measured: ${HY2_MEASURED_DL} Mbit/s${NC}"
+    echo -ne "  ${YELLOW}Suggested [${rec_dl} mbps]: ${NC}"
+    read -r inp; inp="${inp:-${rec_dl}}"
+    inp=$(echo "$inp" | grep -oP '^\d+')
+    final_dl="${inp:-$rec_dl}"
+    echo ""
+
+    # ── quic.initStreamReceiveWindow ──
+    local init_stream_mb
+    init_stream_mb=$(python3 -c "print(f'{${init_stream}/1048576:.0f} MB')" 2>/dev/null)
+    echo -e "  ${CYAN}${BOLD}[ quic.initStreamReceiveWindow ]${NC}"
+    echo -e "  ${DIM}Initial receive buffer for each QUIC stream.${NC}"
+    echo -e "  ${DIM}Larger = faster ramp-up on high-BDP links; too large wastes RAM on low-memory VPS.${NC}"
+    echo -e "  ${DIM}Range: 1 MB – 64 MB   |   Profile suggests: ${init_stream_mb}${NC}"
+    echo -ne "  ${YELLOW}Suggested [${init_stream}]: ${NC}"
+    read -r inp; inp="${inp:-${init_stream}}"
+    inp=$(echo "$inp" | grep -oP '^\d+')
+    final_init_stream="${inp:-$init_stream}"
+    echo ""
+
+    # ── quic.maxStreamReceiveWindow ──
+    local max_stream_mb
+    max_stream_mb=$(python3 -c "print(f'{${max_stream}/1048576:.0f} MB')" 2>/dev/null)
+    echo -e "  ${CYAN}${BOLD}[ quic.maxStreamReceiveWindow ]${NC}"
+    echo -e "  ${DIM}Maximum the stream window can grow to. Must be ≥ initStreamReceiveWindow.${NC}"
+    echo -e "  ${DIM}Range: initStream – 128 MB   |   Profile suggests: ${max_stream_mb}${NC}"
+    echo -ne "  ${YELLOW}Suggested [${max_stream}]: ${NC}"
+    read -r inp; inp="${inp:-${max_stream}}"
+    inp=$(echo "$inp" | grep -oP '^\d+')
+    final_max_stream="${inp:-$max_stream}"
+    echo ""
+
+    # ── quic.initConnReceiveWindow ──
+    local init_conn_mb
+    init_conn_mb=$(python3 -c "print(f'{${init_conn}/1048576:.0f} MB')" 2>/dev/null)
+    echo -e "  ${CYAN}${BOLD}[ quic.initConnReceiveWindow ]${NC}"
+    echo -e "  ${DIM}Initial receive buffer for the entire QUIC connection (sum of all streams).${NC}"
+    echo -e "  ${DIM}Should be 2× initStreamReceiveWindow for typical single-user tunnels.${NC}"
+    echo -e "  ${DIM}Range: 2 MB – 128 MB   |   Profile suggests: ${init_conn_mb}${NC}"
+    echo -ne "  ${YELLOW}Suggested [${init_conn}]: ${NC}"
+    read -r inp; inp="${inp:-${init_conn}}"
+    inp=$(echo "$inp" | grep -oP '^\d+')
+    final_init_conn="${inp:-$init_conn}"
+    echo ""
+
+    # ── quic.maxConnReceiveWindow ──
+    local max_conn_mb
+    max_conn_mb=$(python3 -c "print(f'{${max_conn}/1048576:.0f} MB')" 2>/dev/null)
+    echo -e "  ${CYAN}${BOLD}[ quic.maxConnReceiveWindow ]${NC}"
+    echo -e "  ${DIM}Maximum the connection window can grow to. Should be 2× maxStreamReceiveWindow.${NC}"
+    echo -e "  ${DIM}Range: 4 MB – 256 MB   |   Profile suggests: ${max_conn_mb}${NC}"
+    echo -ne "  ${YELLOW}Suggested [${max_conn}]: ${NC}"
+    read -r inp; inp="${inp:-${max_conn}}"
+    inp=$(echo "$inp" | grep -oP '^\d+')
+    final_max_conn="${inp:-$max_conn}"
+    echo ""
+
+    # ── quic.maxIdleTimeout ──
+    echo -e "  ${CYAN}${BOLD}[ quic.maxIdleTimeout ]${NC}"
+    echo -e "  ${DIM}How long a connection can be idle before the server closes it.${NC}"
+    echo -e "  ${DIM}60s is a good balance — too short causes reconnects, too long wastes resources.${NC}"
+    echo -e "  ${DIM}Range: 15s – 300s${NC}"
+    echo -ne "  ${YELLOW}Suggested [60s]: ${NC}"
+    read -r inp; inp="${inp:-60s}"
+    # ensure 's' suffix
+    [[ "$inp" =~ ^[0-9]+$ ]] && inp="${inp}s"
+    final_idle_timeout="$inp"
+    echo ""
+
+    # ── quic.keepAlivePeriod ──
+    echo -e "  ${CYAN}${BOLD}[ quic.keepAlivePeriod ]${NC}"
+    echo -e "  ${DIM}How often the server sends PING frames to keep the connection alive through NAT/firewalls.${NC}"
+    echo -e "  ${DIM}20s is ideal for most Iranian ISP NAT tables which time out around 30s.${NC}"
+    echo -e "  ${DIM}Range: 5s – 60s${NC}"
+    echo -ne "  ${YELLOW}Suggested [20s]: ${NC}"
+    read -r inp; inp="${inp:-20s}"
+    [[ "$inp" =~ ^[0-9]+$ ]] && inp="${inp}s"
+    final_keepalive="$inp"
+    echo ""
+
+    # ── Summary ───────────────────────────────────────────
+    echo -e "\n${BOLD}  Summary of changes to be applied:${NC}"
+    echo -e "  ┌──────────────────────────────────────────────────────┐"
+    printf  "  │  %-35s %s\n" "bandwidth.up:"                "${final_ul} mbps"
+    printf  "  │  %-35s %s\n" "bandwidth.down:"              "${final_dl} mbps"
+    printf  "  │  %-35s %s\n" "quic.initStreamReceiveWindow:" "${final_init_stream}"
+    printf  "  │  %-35s %s\n" "quic.maxStreamReceiveWindow:"  "${final_max_stream}"
+    printf  "  │  %-35s %s\n" "quic.initConnReceiveWindow:"   "${final_init_conn}"
+    printf  "  │  %-35s %s\n" "quic.maxConnReceiveWindow:"    "${final_max_conn}"
+    printf  "  │  %-35s %s\n" "quic.maxIdleTimeout:"          "${final_idle_timeout}"
+    printf  "  │  %-35s %s\n" "quic.keepAlivePeriod:"         "${final_keepalive}"
+    echo -e "  └──────────────────────────────────────────────────────┘\n"
+
+    confirm "Apply these settings to ${HY2_CONFIG}?" "y" || { print_info "Aborted. No changes made."; press_enter; return 0; }
+
+    # ── Write optimized config via python3 ────────────────
+    python3 << PYEOF
+import re, sys
+
+config_path = "${HY2_CONFIG}"
+
+try:
+    with open(config_path, 'r') as f:
+        content = f.read()
+except Exception as e:
+    print(f"ERROR reading config: {e}")
+    sys.exit(1)
+
+# ── bandwidth block ──────────────────────────────────────
+bw_block = """bandwidth:
+  up: ${final_ul} mbps
+  down: ${final_dl} mbps"""
+
+if re.search(r'^bandwidth:', content, re.MULTILINE):
+    content = re.sub(
+        r'^bandwidth:.*?(?=^\S|\Z)',
+        bw_block + '\n\n',
+        content, flags=re.MULTILINE | re.DOTALL
+    )
+else:
+    content = content.rstrip('\n') + '\n\n' + bw_block + '\n'
+
+# ── quic block ───────────────────────────────────────────
+quic_block = """quic:
+  initStreamReceiveWindow: ${final_init_stream}
+  maxStreamReceiveWindow: ${final_max_stream}
+  initConnReceiveWindow: ${final_init_conn}
+  maxConnReceiveWindow: ${final_max_conn}
+  maxIdleTimeout: ${final_idle_timeout}
+  keepAlivePeriod: ${final_keepalive}"""
+
+if re.search(r'^quic:', content, re.MULTILINE):
+    content = re.sub(
+        r'^quic:.*?(?=^\S|\Z)',
+        quic_block + '\n\n',
+        content, flags=re.MULTILINE | re.DOTALL
+    )
+else:
+    content = content.rstrip('\n') + '\n\n' + quic_block + '\n'
+
+with open(config_path, 'w') as f:
+    f.write(content)
+
+print("OK")
+PYEOF
+
+    local py_result=$?
+    if [[ $py_result -ne 0 ]]; then
+        print_error "Failed to update config. Check ${HY2_CONFIG} manually."
+        press_enter; return 1
+    fi
+
+    print_success "Config updated successfully."
+
+    # Restart if running
+    if systemctl is-active --quiet hysteria-server 2>/dev/null; then
+        print_info "Restarting hysteria-server to apply changes..."
+        systemctl restart hysteria-server
+        sleep 2
+        if systemctl is-active --quiet hysteria-server; then
+            print_success "hysteria-server restarted and running with optimized config."
+        else
+            print_error "hysteria-server failed to restart — check: journalctl -u hysteria-server -n 20"
+        fi
+    else
+        print_info "hysteria-server is not running. Start it from the menu when ready."
+    fi
+
+    press_enter
+}
+
+setup_hysteria2_server() {
+    print_banner
+    echo -e "${BOLD}  Install Hysteria2 Server${NC}\n"
+    echo -e "  ${CYAN}Hysteria2 uses QUIC/UDP — much harder to detect than TCP-based protocols.${NC}\n"
+
+    check_internet
+
+    local hy2_ver
+    print_info "Fetching latest Hysteria2 version..."
+    hy2_ver=$(get_latest_hy2_version)
+    if [[ -z "$hy2_ver" ]]; then
+        print_warn "Could not auto-detect version. Using 2.6.1 as fallback."
+        hy2_ver="2.6.1"
+    fi
+    echo -e "  Latest version: ${GREEN}${hy2_ver}${NC}\n"
+
+    print_step "1/5" "Installing Hysteria2 binary..."
+    install_hysteria2_bin "$hy2_ver" || { press_enter; return; }
+
+    print_step "2/5" "Configure parameters..."
+    echo ""
+    local hy2_port hy2_password hy2_domain
+
+    # Generate a strong random password
+    local default_pass
+    default_pass=$(openssl rand -base64 18 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 24 \
+                   || cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 24)
+
+    ask hy2_port     "  UDP listen port"         "443"
+    ask hy2_password "  Password"                 "$default_pass"
+    ask hy2_domain   "  Domain/SNI for TLS cert (leave blank for self-signed)" ""
+
+    if [[ -z "$hy2_domain" ]]; then
+        print_warn "No domain provided. Using self-signed certificate (clients must set insecure=true)."
+    fi
+
+    print_step "3/5" "Generating TLS certificate & writing base config..."
+    mkdir -p /etc/hysteria
+
+    if [[ -n "$hy2_domain" ]]; then
+        cat > "$HY2_CONFIG" << YAMLEOF
+listen: :${hy2_port}
+
+acme:
+  domains:
+    - ${hy2_domain}
+  email: admin@${hy2_domain}
+
+auth:
+  type: password
+  password: ${hy2_password}
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.speedtest.net
+    rewriteHost: true
+
+bandwidth:
+  up: 1 gbps
+  down: 1 gbps
+YAMLEOF
+    else
+        print_info "Generating self-signed TLS certificate..."
+        mkdir -p /etc/hysteria/certs
+        openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+            -keyout /etc/hysteria/certs/key.pem \
+            -out /etc/hysteria/certs/cert.pem \
+            -days 3650 -subj "/CN=hysteria" &>/dev/null \
+            && print_success "Self-signed cert generated." \
+            || { print_error "openssl not found. Install with: apt install openssl"; press_enter; return; }
+
+        cat > "$HY2_CONFIG" << YAMLEOF
+listen: :${hy2_port}
+
+tls:
+  cert: /etc/hysteria/certs/cert.pem
+  key: /etc/hysteria/certs/key.pem
+
+auth:
+  type: password
+  password: ${hy2_password}
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.speedtest.net
+    rewriteHost: true
+
+bandwidth:
+  up: 1 gbps
+  down: 1 gbps
+YAMLEOF
+    fi
+
+    # Save server info for link generation
+    local server_ip
+    server_ip=$(get_ipv4)
+    local selfcert_val
+    [[ -z "$hy2_domain" ]] && selfcert_val="True" || selfcert_val="False"
+    python3 -c "
+import json
+data = {
+    'ip':       '${server_ip}',
+    'port':     '${hy2_port}',
+    'password': '${hy2_password}',
+    'domain':   '${hy2_domain}',
+    'selfcert': ${selfcert_val}
+}
+with open('${HY2_SERVER_INFO}', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+    print_success "Base config written to ${HY2_CONFIG}"
+
+    print_step "4/5" "Opening firewall & starting service..."
+    if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow "${hy2_port}"/udp &>/dev/null
+        ufw allow "${hy2_port}"/tcp &>/dev/null
+        print_success "UFW: UDP+TCP port ${hy2_port} opened."
+    elif command -v iptables &>/dev/null; then
+        iptables -I INPUT -p udp --dport "$hy2_port" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p tcp --dport "$hy2_port" -j ACCEPT 2>/dev/null || true
+        print_info "iptables: UDP+TCP port ${hy2_port} opened."
+    fi
+
+    create_hy2_service_server
+    systemctl restart hysteria-server
+    sleep 2
+
+    if systemctl is-active --quiet hysteria-server; then
+        print_success "hysteria-server is running."
+    else
+        print_error "hysteria-server failed to start!"
+        journalctl -u hysteria-server --no-pager -n 20
+        press_enter; return
+    fi
+
+    # Build connection link for display
+    local insecure_flag="" sni_part=""
+    if [[ -z "$hy2_domain" ]]; then
+        insecure_flag="&insecure=1"
+        sni_part="sni=hysteria"
+    else
+        sni_part="sni=${hy2_domain}"
+    fi
+    local hy2_link="hysteria2://${hy2_password}@${server_ip}:${hy2_port}?${sni_part}${insecure_flag}#Hysteria2-Server"
+
+    echo ""
+    echo -e "${GREEN}${BOLD}+----------------------------------------------+"
+    echo -e "|     Hysteria2 Server installed & running!    |"
+    echo -e "+----------------------------------------------+${NC}"
+    echo ""
+    echo -e "${BOLD}Connection details:${NC}"
+    echo -e "  IP:       ${CYAN}${server_ip}${NC}"
+    echo -e "  Port:     ${CYAN}${hy2_port}/UDP${NC}"
+    echo -e "  Password: ${CYAN}${hy2_password}${NC}"
+    [[ -n "$hy2_domain" ]] \
+        && echo -e "  Domain:   ${CYAN}${hy2_domain}${NC}" \
+        || echo -e "  TLS:      ${YELLOW}Self-signed (insecure=true required on client)${NC}"
+    echo ""
+    echo -e "${BOLD}Hysteria2 link (v2rayN / Hiddify compatible):${NC}"
+    echo -e "  ${MAGENTA}${hy2_link}${NC}"
+    print_qr "$hy2_link"
+
+    echo -e "\n${BOLD}${YELLOW}[IMPORTANT] UDP must be allowed in your VPS firewall panel too!${NC}"
+    echo -e "${DIM}  Check your Hetzner/Vultr/DigitalOcean firewall rules for UDP ${hy2_port}.${NC}\n"
+
+    # ── Step 5: Automatic performance optimization ──────
+    print_step "5/5" "Performance optimization..."
+    echo ""
+    echo -e "  ${CYAN}The server is running with default bandwidth settings (1 gbps placeholder).${NC}"
+    echo -e "  ${CYAN}Running the optimization wizard will measure real bandwidth and tune QUIC windows.${NC}\n"
+
+    if confirm "Run Performance Optimization Wizard now? (recommended)" "y"; then
+        hy2_optimize_wizard "no"
+    else
+        echo -e "\n  ${DIM}You can run this later from the Hysteria2 menu → Optimize Performance.${NC}"
+        press_enter
+    fi
+}
+
+show_hysteria2_status() {
+    print_banner
+    echo -e "${BOLD}  Hysteria2 Status${NC}\n"
+
+    if ! command -v "$HY2_BIN" &>/dev/null; then
+        print_warn "Hysteria2 is not installed."
+        press_enter; return
+    fi
+
+    local ver
+    ver=$("$HY2_BIN" version 2>/dev/null | grep -oP '[\d.]+' | head -1 || echo "unknown")
+    echo -e "  Version: ${CYAN}${ver}${NC}"
+
+    if systemctl is-active --quiet hysteria-server 2>/dev/null; then
+        echo -e "  Server:  ${GREEN}[ACTIVE]${NC}"
+    else
+        echo -e "  Server:  ${RED}[INACTIVE]${NC}"
+    fi
+
+    if [[ -f "$HY2_SERVER_INFO" ]]; then
+        echo ""
+        echo -e "  ${BOLD}Server info:${NC}"
+        python3 -c "
+import json
+with open('${HY2_SERVER_INFO}') as f: d=json.load(f)
+print(f\"  IP:       {d.get('ip','?')}\")
+print(f\"  Port:     {d.get('port','?')}/UDP\")
+print(f\"  Password: {d.get('password','?')}\")
+print(f\"  Domain:   {d.get('domain','self-signed')}\")
+" 2>/dev/null
+
+        # Rebuild and show link
+        local ip port password domain selfcert
+        ip=$(python3 -c "import json; d=json.load(open('${HY2_SERVER_INFO}')); print(d.get('ip',''))" 2>/dev/null)
+        port=$(python3 -c "import json; d=json.load(open('${HY2_SERVER_INFO}')); print(d.get('port',''))" 2>/dev/null)
+        password=$(python3 -c "import json; d=json.load(open('${HY2_SERVER_INFO}')); print(d.get('password',''))" 2>/dev/null)
+        domain=$(python3 -c "import json; d=json.load(open('${HY2_SERVER_INFO}')); print(d.get('domain',''))" 2>/dev/null)
+        selfcert=$(python3 -c "import json; d=json.load(open('${HY2_SERVER_INFO}')); print(d.get('selfcert',True))" 2>/dev/null)
+
+        local insecure_flag="" sni_part=""
+        if [[ "$selfcert" == "True" || -z "$domain" ]]; then
+            insecure_flag="&insecure=1"
+            sni_part="sni=hysteria"
+        else
+            sni_part="sni=${domain}"
+        fi
+        local hy2_link="hysteria2://${password}@${ip}:${port}?${sni_part}${insecure_flag}#Hysteria2-Server"
+        echo ""
+        echo -e "  ${BOLD}Connection link:${NC}"
+        echo -e "  ${MAGENTA}${hy2_link}${NC}"
+        print_qr "$hy2_link"
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}1)${NC}  View logs (last 30 lines)"
+    echo -e "  ${CYAN}2)${NC}  Restart service"
+    echo -e "  ${CYAN}3)${NC}  Stop service"
+    echo -e "  ${CYAN}0)${NC}  Back"
+    echo ""
+    echo -ne "${YELLOW}Choice: ${NC}"
+    read -r choice
+    case "$choice" in
+        1) echo ""; journalctl -u hysteria-server --no-pager -n 30; press_enter ;;
+        2) systemctl restart hysteria-server; sleep 2
+           systemctl is-active --quiet hysteria-server \
+               && print_success "hysteria-server restarted." \
+               || print_error "Failed to restart."; press_enter ;;
+        3) systemctl stop hysteria-server && print_success "hysteria-server stopped."; press_enter ;;
+        0) return ;;
+    esac
+}
+
+uninstall_hysteria2() {
+    print_banner
+    echo -e "${RED}${BOLD}  Uninstall Hysteria2${NC}\n"
+    confirm "Remove Hysteria2 completely?" "n" || return
+    systemctl stop    hysteria-server 2>/dev/null || true
+    systemctl disable hysteria-server 2>/dev/null || true
+    rm -f /etc/systemd/system/hysteria-server.service
+    rm -f "$HY2_BIN"
+    rm -rf /etc/hysteria
+    systemctl daemon-reload
+    print_success "Hysteria2 completely removed."
+    press_enter
+}
+
+hysteria2_menu() {
+    while true; do
+        print_banner
+        local hy2_status="inactive"
+        systemctl is-active --quiet hysteria-server 2>/dev/null && hy2_status="active"
+
+        echo -e "${BOLD}  Hysteria2 — QUIC/UDP Protocol${NC}"
+        echo -e "  ${DIM}Better DPI bypass than TCP-based protocols${NC}\n"
+
+        [[ "$hy2_status" == "active" ]] \
+            && echo -e "  Server: ${GREEN}[ACTIVE]${NC}\n" \
+            || echo -e "  Server: ${RED}[INACTIVE]${NC}\n"
+
+        echo -e "  ${CYAN}1)${NC}  Install / Setup Hysteria2 Server"
+        echo -e "  ${CYAN}2)${NC}  Optimize Performance (bandwidth + QUIC tuning)"
+        echo -e "  ${CYAN}3)${NC}  Status, logs & connection link"
+        echo -e "  ${CYAN}4)${NC}  Uninstall Hysteria2"
+        echo -e "  ${CYAN}0)${NC}  Back"
+        echo ""
+        echo -ne "${YELLOW}Choice: ${NC}"
+        read -r choice
+        case "$choice" in
+            1) setup_hysteria2_server ;;
+            2) hy2_optimize_wizard "no" ;;
+            3) show_hysteria2_status ;;
+            4) uninstall_hysteria2 ;;
+            0) return ;;
+            *) print_warn "Invalid choice."; sleep 1 ;;
+        esac
+    done
+}
+
 # ─── Main Menu ────────────────────────────────────────────
 
 main_menu() {
     while true; do
         print_banner
-        local sv cl f2b
-        sv=$(systemctl is-active sing-box        2>/dev/null || echo "inactive")
-        cl=$(systemctl is-active sing-box-client 2>/dev/null || echo "inactive")
-        f2b=$(systemctl is-active fail2ban       2>/dev/null || echo "inactive")
-        [[ "$sv"  == "active" ]] && echo -e "  Server:   ${GREEN}[ACTIVE]${NC}"
-        [[ "$cl"  == "active" ]] && echo -e "  Client:   ${GREEN}[ACTIVE]${NC}"
-        [[ "$f2b" == "active" ]] && echo -e "  Fail2ban: ${GREEN}[ACTIVE]${NC}"
+        local sv cl f2b hy2
+        sv=$(systemctl is-active sing-box         2>/dev/null || echo "inactive")
+        cl=$(systemctl is-active sing-box-client  2>/dev/null || echo "inactive")
+        f2b=$(systemctl is-active fail2ban        2>/dev/null || echo "inactive")
+        hy2=$(systemctl is-active hysteria-server 2>/dev/null || echo "inactive")
+        [[ "$sv"  == "active" ]] && echo -e "  VLESS/Reality : ${GREEN}[ACTIVE]${NC}"
+        [[ "$cl"  == "active" ]] && echo -e "  Client        : ${GREEN}[ACTIVE]${NC}"
+        [[ "$hy2" == "active" ]] && echo -e "  Hysteria2     : ${GREEN}[ACTIVE]${NC}"
+        [[ "$f2b" == "active" ]] && echo -e "  Fail2ban      : ${GREEN}[ACTIVE]${NC}"
         echo ""
         echo -e "${BOLD}  --- Installation ---${NC}"
-        echo -e "  ${CYAN}1)${NC}  Install outbound server (e.g. Germany)"
-        echo -e "  ${CYAN}2)${NC}  Install Iran client (tunnel to outbound)"
+        echo -e "  ${CYAN}1)${NC}  Install VLESS+Reality server (outbound)"
+        echo -e "  ${CYAN}2)${NC}  Install Iran relay client"
+        echo -e "  ${CYAN}3)${NC}  Hysteria2 (QUIC/UDP) — better DPI bypass"
         echo ""
         echo -e "${BOLD}  --- Management ---${NC}"
-        echo -e "  ${CYAN}3)${NC}  User management"
-        echo -e "  ${CYAN}4)${NC}  Show status & logs"
-        echo -e "  ${CYAN}5)${NC}  Manage service"
-        echo -e "  ${CYAN}6)${NC}  Network optimization (BBR & TCP)"
-        echo -e "  ${CYAN}7)${NC}  Fail2ban - intrusion protection"
-        echo -e "  ${CYAN}8)${NC}  Speed test"
-        echo -e "  ${CYAN}9)${NC}  Update sing-box"
-        echo -e "  ${CYAN}10)${NC} Uninstall"
+        echo -e "  ${CYAN}4)${NC}  User management"
+        echo -e "  ${CYAN}5)${NC}  Show status & logs"
+        echo -e "  ${CYAN}6)${NC}  Manage service"
+        echo -e "  ${CYAN}7)${NC}  Network optimization (BBR & TCP)"
+        echo -e "  ${CYAN}8)${NC}  Fail2ban - intrusion protection"
+        echo -e "  ${CYAN}9)${NC}  Speed test"
+        echo -e "  ${CYAN}10)${NC} Update sing-box"
+        echo -e "  ${CYAN}11)${NC} Uninstall sing-box"
         echo ""
         echo -e "  ${DIM}0)  Exit${NC}"
         echo ""
@@ -2230,14 +2931,15 @@ main_menu() {
         case "$choice" in
             1)  setup_server ;;
             2)  setup_client ;;
-            3)  manage_users ;;
-            4)  show_status ;;
-            5)  manage_service ;;
-            6)  network_optimization ;;
-            7)  fail2ban_menu ;;
-            8)  speed_test ;;
-            9)  update_singbox ;;
-            10) uninstall ;;
+            3)  hysteria2_menu ;;
+            4)  manage_users ;;
+            5)  show_status ;;
+            6)  manage_service ;;
+            7)  network_optimization ;;
+            8)  fail2ban_menu ;;
+            9)  speed_test ;;
+            10) update_singbox ;;
+            11) uninstall ;;
             0)  echo -e "\n${DIM}Goodbye.${NC}\n"; exit 0 ;;
             *)  print_warn "Invalid option."; sleep 1 ;;
         esac

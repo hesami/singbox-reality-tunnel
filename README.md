@@ -8,7 +8,7 @@
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-2.5.0-blue?style=flat-square" alt="version"/>
+  <img src="https://img.shields.io/badge/version-2.5.2-blue?style=flat-square" alt="version"/>
   <img src="https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-orange?style=flat-square" alt="platform"/>
   <img src="https://img.shields.io/badge/protocol-VLESS%20%2B%20REALITY%20%2B%20Hysteria2-purple?style=flat-square" alt="protocol"/>
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license"/>
@@ -234,15 +234,40 @@ Configurable parameters (QUIC & bandwidth):
 
 #### 3.3 — Hysteria2 User Management
 
-Full multi-user system with granular per-user controls:
+Full multi-user system with granular per-user controls and automatic traffic tracking.
 
-**Components:**
-- **SQLite Database** (`/etc/hysteria/users.db`) — stores user credentials, quotas, usage, expiry, enable/disable state
-- **Flask Auth API** (`/etc/hysteria/auth_api.py`) — authentication & subscription server running on port 18989
-- **Traffic Sync Script** (`/etc/hysteria/sync_traffic.py`) — periodic sync of user traffic from Hysteria2 stats API (port 18990) to database
-- **Subscription Links** — standard `hysteria2://` URLs compatible with all Hysteria2 clients
+##### 3.3.0 — Components
 
-**User Management Features:**
+- **SQLite Database** (`/etc/hysteria/users.db`) \u2014 stores user credentials, quotas, usage, expiry, enable/disable state
+- **Flask Auth API** (`/etc/hysteria/auth_api.py`) \u2014 authentication & subscription server running on port 18989 (auto-opened in firewall)
+- **Traffic Sync Script** (`/etc/hysteria/sync_traffic.py`) \u2014 periodic sync (every 2 minutes) of user traffic from Hysteria2 stats API (port 18990) to database
+- **Subscription Links** \u2014 standard `hysteria2://` URLs compatible with all Hysteria2 clients
+
+##### 3.3.1 — Installation & Automatic Setup
+
+The user management setup includes 7 automated steps with intelligent error recovery:
+
+1. **SQLite database initialization** \u2014 creates `/etc/hysteria/users.db` schema for user storage
+2. **Auth API deployment** \u2014 writes and starts Flask authentication service
+3. **Traffic sync script** \u2014 generates Python daemon for quota enforcement
+4. **Config patching** \u2014 adds `trafficStats` API and HTTP auth to Hysteria2 config
+5. **Auth service startup** \u2014 starts `hysteria-auth` systemd service with health checks and auto-retry
+6. **Firewall rules** \u2014 automatically opens port 18989 (UFW/iptables) for client subscriptions
+7. **Cron installation & verification** \u2014 installs traffic sync with dual-method robustness (crontab + /etc/cron.d fallback)
+
+**Automatic post-install verification performs 8 checks:**
+- hysteria-server status (\u2714 running or \u2717 failed)
+- hysteria-auth service operational
+- trafficStats API present in config
+- Stats API responding on port 18990
+- Auth API responding on port 18989 with `/health` endpoint
+- Cron job properly installed (both methods checked)
+- Cron service running and active
+- Sync log created and monitoring
+
+If any check fails, automatic remediation is attempted and full status report displayed. Initial sync run immediately to verify database connectivity.
+
+##### 3.3.2 — User Management Features
 | Feature | Description |
 |---------|-------------|
 | **Add user** | Set username, password (auto-generated), quota (0 = unlimited), expiry date |
@@ -253,11 +278,19 @@ Full multi-user system with granular per-user controls:
 | **Reset traffic** | Zero out user's usage counter |
 | **Delete user** | Permanently remove from database and config |
 
-**Traffic Tracking:**
-- Automatic sync every 5 minutes (configurable via cron)
-- Pulls usage stats directly from Hysteria2's built-in traffic API
-- Auto-disables users over quota (configurable behavior)
+**Traffic Tracking & Cron Robustness:**
+- Automatic sync every 2 minutes via cron with intelligent service detection
+- **Smart cron installation:**
+  * Auto-detects cron vs crond service name
+  * Enables and starts service automatically
+  * Attempts recovery if first start fails
+  * Falls back to `/etc/cron.d/` if crontab fails
+  * Verifies installation by reading crontab after write
+- Pulls usage stats directly from Hysteria2's built-in traffic API (port 18990)
+- Auto-disables users exceeding quota (configurable behavior)
 - Tracks both upload and download bytes per user
+- Health-check logging to `/var/log/hysteria-sync.log` with line counts
+- Runs initial sync immediately after setup to verify database connectivity
 
 #### 3.4 — TCP Brutal Congestion Control
 
@@ -472,8 +505,11 @@ Completely removes all traces of sing-box:
 └── users.json                       # User database (uuid, label, quota, usage)
 
 /etc/hysteria/
-├── config.yaml                      # Hysteria2 server configuration
-├── server.json                      # Hysteria2 server identity
+├── config.yaml                      # Hysteria2 server configuration (with trafficStats & HTTP auth)
+├── server.json                      # Hysteria2 server identity (IP, port, domain)
+├── users.db                         # SQLite database for user credentials, quotas, expiry
+├── auth_api.py                      # Flask auth service + subscription endpoint
+├── sync_traffic.py                  # Traffic sync daemon (runs via cron)
 └── tls/                             # TLS certs directory (if applicable)
 
 /etc/systemd/system/
@@ -485,6 +521,12 @@ Completely removes all traces of sing-box:
 
 /var/log/sing-box/
 └── sing-box.log                     # Log file (created by fail2ban installer)
+
+/var/log/
+└── hysteria-sync.log                # Traffic sync daemon log (health checks & quota updates)
+
+/etc/cron.d/
+└── hysteria-sync                    # Cron job fallback (if crontab write fails)
 
 /etc/fail2ban/
 ├── jail.local                       # Fail2ban jail config
@@ -589,7 +631,7 @@ ps aux | grep sing-box
 
 **Mehdi Hesami**
 
-- Script version: `2.5.0`
+- Script version: `2.5.2`
 - Protocols: VLESS + REALITY & Hysteria2 with user management ([sing-box](https://github.com/SagerNet/sing-box), [Hysteria](https://github.com/apernet/hysteria), Flask)
 - Tested on: Ubuntu 22.04 LTS
 

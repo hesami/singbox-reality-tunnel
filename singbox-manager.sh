@@ -46,7 +46,7 @@ print_banner() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo "  +-----------------------------------------------+"
-    echo "  |       sing-box Setup & Manager v2.5.0        |"
+    echo "  |       sing-box Setup & Manager v2.5.2        |"
     echo "  |       VLESS + REALITY + Hysteria2             |"
     echo "  |       Author: Mehdi Hesami                    |"
     echo "  +-----------------------------------------------+"
@@ -2702,26 +2702,72 @@ SVCEOF
 
 # Install cron job for traffic sync (every 2 minutes)
 hy2_install_cron() {
-    # Ensure cron daemon is installed
+    # ── Step 1: Make sure cron is installed ──────────────────
     if ! command -v crontab &>/dev/null; then
         print_info "cron not found. Installing..."
-        apt-get install -y cron 2>/dev/null \
-            && systemctl enable cron 2>/dev/null \
-            && systemctl start  cron 2>/dev/null \
-            || { print_error "Could not install cron. Traffic sync will not run automatically."; return 1; }
-        print_success "cron installed and started."
+        apt-get install -y cron 2>/dev/null || {
+            print_error "Could not install cron. Traffic sync will not run automatically."
+            return 1
+        }
+        print_success "cron package installed."
     fi
 
-    # Make sure cron service is running
-    if ! systemctl is-active --quiet cron 2>/dev/null && ! systemctl is-active --quiet crond 2>/dev/null; then
-        systemctl start cron 2>/dev/null || systemctl start crond 2>/dev/null || true
+    # ── Step 2: Enable cron service (both cron and crond names) ──
+    local cron_svc=""
+    if systemctl list-unit-files cron.service &>/dev/null 2>&1 | grep -q "cron.service"; then
+        cron_svc="cron"
+    elif systemctl list-unit-files crond.service &>/dev/null 2>&1 | grep -q "crond.service"; then
+        cron_svc="crond"
     fi
 
-    # Install our sync entry (remove old one first)
-    (crontab -l 2>/dev/null || true) | grep -v "hysteria" > /tmp/hy2_cron.tmp
-    echo "*/2 * * * * /usr/bin/python3 ${HY2_SYNC_SCRIPT} >> /var/log/hysteria-sync.log 2>&1" >> /tmp/hy2_cron.tmp
-    crontab /tmp/hy2_cron.tmp && rm -f /tmp/hy2_cron.tmp
-    print_success "Traffic sync cron installed (every 2 minutes)."
+    if [[ -n "$cron_svc" ]]; then
+        systemctl enable "$cron_svc" &>/dev/null || true
+        if ! systemctl is-active --quiet "$cron_svc" 2>/dev/null; then
+            print_info "Starting $cron_svc service..."
+            systemctl start "$cron_svc" 2>/dev/null || true
+            sleep 1
+        fi
+        if systemctl is-active --quiet "$cron_svc" 2>/dev/null; then
+            print_success "Cron service ($cron_svc) is running."
+        else
+            print_warn "Cron service could not be started. Trying fallback..."
+            # Fallback: try starting cron directly
+            service cron start 2>/dev/null || service crond start 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+
+    # ── Step 3: Install cron entry ────────────────────────────
+    local cron_line="*/2 * * * * /usr/bin/python3 ${HY2_SYNC_SCRIPT} >> /var/log/hysteria-sync.log 2>&1"
+
+    # Remove any old hysteria cron entries, then add fresh one
+    { crontab -l 2>/dev/null || true; } | { grep -v "hysteria\|sync_traffic" || true; } > /tmp/hy2_cron.tmp
+    echo "$cron_line" >> /tmp/hy2_cron.tmp
+    if crontab /tmp/hy2_cron.tmp; then
+        rm -f /tmp/hy2_cron.tmp
+        print_success "Traffic sync cron installed (every 2 minutes)."
+    else
+        rm -f /tmp/hy2_cron.tmp
+        print_error "crontab write failed."
+        return 1
+    fi
+
+    # ── Step 4: Verify cron entry is actually saved ───────────
+    if crontab -l 2>/dev/null | grep -q "sync_traffic"; then
+        print_success "Cron entry verified in crontab."
+    else
+        print_error "Cron entry was NOT saved! Attempting manual write..."
+        # Last resort: write directly to /etc/cron.d/
+        echo "$cron_line" > /etc/cron.d/hysteria-sync
+        chmod 644 /etc/cron.d/hysteria-sync
+        print_info "Written to /etc/cron.d/hysteria-sync as fallback."
+    fi
+
+    # ── Step 5: Run sync once immediately ─────────────────────
+    print_info "Running initial traffic sync..."
+    touch /var/log/hysteria-sync.log
+    python3 "${HY2_SYNC_SCRIPT}" >> /var/log/hysteria-sync.log 2>&1 || true
+    print_success "Initial sync complete."
 }
 
 # Patch Hysteria2 config: replace password auth with http auth + add trafficStats
@@ -2753,6 +2799,105 @@ with open(path, 'w') as f:
     f.write(content)
 print("OK")
 PYEOF
+}
+
+# ── Full post-install verification ────────────────────────
+hy2_verify_setup() {
+    echo ""
+    echo -e "${BOLD}  ── Setup Verification ──────────────────────────────${NC}"
+    local all_ok=true
+
+    # 1. hysteria-server running?
+    if systemctl is-active --quiet hysteria-server 2>/dev/null; then
+        echo -e "  ${GREEN}[OK]${NC} hysteria-server   : running"
+    else
+        echo -e "  ${RED}[FAIL]${NC} hysteria-server  : NOT running"
+        echo -e "       ${DIM}Fix: systemctl start hysteria-server${NC}"
+        all_ok=false
+    fi
+
+    # 2. hysteria-auth running?
+    if systemctl is-active --quiet hysteria-auth 2>/dev/null; then
+        echo -e "  ${GREEN}[OK]${NC} hysteria-auth     : running"
+    else
+        echo -e "  ${RED}[FAIL]${NC} hysteria-auth    : NOT running"
+        echo -e "       ${DIM}Fix: systemctl start hysteria-auth${NC}"
+        all_ok=false
+    fi
+
+    # 3. trafficStats in config?
+    if grep -q "trafficStats" "${HY2_CONFIG}" 2>/dev/null; then
+        echo -e "  ${GREEN}[OK]${NC} trafficStats      : present in config"
+    else
+        echo -e "  ${RED}[FAIL]${NC} trafficStats     : MISSING from config"
+        echo -e "       ${DIM}Fix: re-run Setup User Management${NC}"
+        all_ok=false
+    fi
+
+    # 4. Stats API responding?
+    sleep 2  # give server time to start
+    local stats_resp
+    stats_resp=$(curl -s --connect-timeout 5 "http://127.0.0.1:${HY2_STATS_PORT}/traffic" 2>/dev/null || echo "")
+    if [[ -n "$stats_resp" ]]; then
+        echo -e "  ${GREEN}[OK]${NC} Stats API (18990) : responding"
+    else
+        echo -e "  ${YELLOW}[WARN]${NC} Stats API (18990): not responding yet"
+        echo -e "       ${DIM}(Normal if no users connected yet — will work after first connection)${NC}"
+    fi
+
+    # 5. Auth API responding?
+    local auth_resp
+    auth_resp=$(curl -s --connect-timeout 3 "http://127.0.0.1:${HY2_AUTH_PORT}/health" 2>/dev/null || echo "")
+    if [[ "$auth_resp" == "ok" ]]; then
+        echo -e "  ${GREEN}[OK]${NC} Auth API (18989)  : responding"
+    else
+        echo -e "  ${RED}[FAIL]${NC} Auth API (18989) : not responding"
+        echo -e "       ${DIM}Fix: systemctl restart hysteria-auth${NC}"
+        all_ok=false
+    fi
+
+    # 6. Cron job installed?
+    local cron_ok=false
+    if crontab -l 2>/dev/null | grep -q "sync_traffic"; then
+        cron_ok=true
+    elif [[ -f /etc/cron.d/hysteria-sync ]]; then
+        cron_ok=true
+    fi
+    if $cron_ok; then
+        echo -e "  ${GREEN}[OK]${NC} Traffic sync cron : installed"
+    else
+        echo -e "  ${RED}[FAIL]${NC} Traffic sync cron: NOT installed"
+        echo -e "       ${DIM}Fix: re-run Setup User Management${NC}"
+        all_ok=false
+        # Auto-fix attempt
+        print_info "Auto-fixing cron..."
+        hy2_install_cron
+    fi
+
+    # 7. Cron service running?
+    if systemctl is-active --quiet cron 2>/dev/null || systemctl is-active --quiet crond 2>/dev/null; then
+        echo -e "  ${GREEN}[OK]${NC} Cron service      : running"
+    else
+        echo -e "  ${YELLOW}[WARN]${NC} Cron service     : not detected via systemctl"
+        echo -e "       ${DIM}(May still work via /etc/cron.d/ — check in 2 min)${NC}"
+    fi
+
+    # 8. Sync log exists?
+    if [[ -f /var/log/hysteria-sync.log ]]; then
+        local log_lines
+        log_lines=$(wc -l < /var/log/hysteria-sync.log 2>/dev/null || echo 0)
+        echo -e "  ${GREEN}[OK]${NC} Sync log          : exists (${log_lines} lines)"
+    else
+        echo -e "  ${YELLOW}[WARN]${NC} Sync log         : not yet created"
+    fi
+
+    echo ""
+    if $all_ok; then
+        echo -e "  ${GREEN}${BOLD}All checks passed! Traffic tracking is fully operational.${NC}"
+    else
+        echo -e "  ${YELLOW}${BOLD}Some checks failed. See fixes above.${NC}"
+    fi
+    echo ""
 }
 
 # Setup the entire user management stack
@@ -2793,14 +2938,21 @@ hy2_setup_usermgmt() {
         && print_success "Config patched successfully." \
         || { print_error "Config patch failed: ${patch_result}"; press_enter; return; }
 
-    print_step "6/6" "Starting auth service & cron..."
+    print_step "6/7" "Starting auth service..."
     hy2_create_auth_service
     systemctl start hysteria-auth
-    sleep 1
+    sleep 2
     if systemctl is-active --quiet hysteria-auth; then
         print_success "Auth API + Subscription server running on port ${HY2_AUTH_PORT}"
     else
-        print_error "Auth API failed. Check: journalctl -u hysteria-auth -n 20"
+        print_error "Auth API failed to start. Trying restart..."
+        systemctl restart hysteria-auth
+        sleep 2
+        if systemctl is-active --quiet hysteria-auth; then
+            print_success "Auth API started after retry."
+        else
+            print_error "Auth API still failing. Check: journalctl -u hysteria-auth -n 20"
+        fi
     fi
 
     # Open port 18989 for subscription access (Hiddify needs to reach it)
@@ -2812,14 +2964,18 @@ hy2_setup_usermgmt() {
         print_info "iptables: port ${HY2_AUTH_PORT}/tcp opened."
     fi
 
+    print_step "7/7" "Installing traffic sync cron & restarting Hysteria2..."
     hy2_install_cron
 
     print_info "Restarting hysteria-server to apply config changes..."
     systemctl restart hysteria-server
-    sleep 2
-    systemctl is-active --quiet hysteria-server \
-        && print_success "hysteria-server restarted with user management active." \
-        || print_error "hysteria-server failed to restart — check logs."
+    sleep 3
+    if systemctl is-active --quiet hysteria-server; then
+        print_success "hysteria-server restarted with user management active."
+    else
+        print_error "hysteria-server failed to restart — check logs."
+        print_info "Debug: journalctl -u hysteria-server -n 30"
+    fi
 
     echo ""
     echo -e "${GREEN}${BOLD}+------------------------------------------------+"
@@ -2827,6 +2983,9 @@ hy2_setup_usermgmt() {
     echo -e "+------------------------------------------------+${NC}"
     echo -e "\n  ${YELLOW}[!] Add users from 'User Management' before connecting.${NC}"
     echo -e "  ${DIM}The old single-password auth is now replaced by per-user auth.${NC}\n"
+
+    # Run full verification automatically
+    hy2_verify_setup
     press_enter
 }
 
@@ -3167,7 +3326,7 @@ hy2_teardown_usermgmt() {
     systemctl daemon-reload
 
     print_info "Removing cron job..."
-    (crontab -l 2>/dev/null || true) | grep -v "hysteria" | crontab - 2>/dev/null || true
+    { crontab -l 2>/dev/null || true; } | { grep -v "hysteria" || true; } | crontab - 2>/dev/null || true
 
     print_info "Removing scripts and database..."
     rm -f "$HY2_AUTH_API" "$HY2_SYNC_SCRIPT" "$HY2_DB"
@@ -4086,7 +4245,7 @@ uninstall_hysteria2() {
     rm -f "$HY2_BIN"
     rm -rf /etc/hysteria
     # Remove cron entry
-    crontab -l 2>/dev/null | grep -v "hysteria" | crontab - 2>/dev/null || true
+    { crontab -l 2>/dev/null || true; } | { grep -v "hysteria" || true; } | crontab - 2>/dev/null || true
     rm -f /var/log/hysteria-sync.log
     print_success "Hysteria2 completely removed."
     press_enter
@@ -4127,6 +4286,7 @@ hysteria2_menu() {
         echo -e "  ${CYAN}5)${NC}  Setup User Management        ${DIM}Enable per-user auth, quota & expiry${NC}"
         echo -e "  ${CYAN}6)${NC}  Manage Users                 ${DIM}Add / edit users, view links & QR${NC}"
         echo -e "  ${CYAN}7)${NC}  Remove User Management       ${DIM}Reset to single-password mode${NC}"
+        echo -e "  ${CYAN}8)${NC}  Verify & Repair              ${DIM}Check all components & auto-fix issues${NC}"
         echo ""
         echo -e "  ${CYAN}9)${NC}  Uninstall Hysteria2          ${DIM}Remove server, users & all config${NC}"
         echo -e "  ${CYAN}0)${NC}  Back to Main Menu"
@@ -4141,6 +4301,7 @@ hysteria2_menu() {
             5) hy2_setup_usermgmt ;;
             6) hy2_manage_users ;;
             7) hy2_teardown_usermgmt ;;
+            8) print_banner; hy2_verify_setup; press_enter ;;
             9) uninstall_hysteria2 ;;
             0) return ;;
             *) print_warn "Invalid choice."; sleep 1 ;;

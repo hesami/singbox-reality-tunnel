@@ -8,7 +8,7 @@
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-2.3.0-blue?style=flat-square" alt="version"/>
+  <img src="https://img.shields.io/badge/version-2.5.0-blue?style=flat-square" alt="version"/>
   <img src="https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-orange?style=flat-square" alt="platform"/>
   <img src="https://img.shields.io/badge/protocol-VLESS%20%2B%20REALITY%20%2B%20Hysteria2-purple?style=flat-square" alt="protocol"/>
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license"/>
@@ -52,11 +52,13 @@
 
 - **Dual-protocol support** — deploy VLESS + REALITY and/or Hysteria2 tunnels on the same server
 - **One-command deployment** — installs sing-box, generates keys, writes config, creates systemd service, opens firewall
+- **Hysteria2 user management** — SQLite database with Flask auth API, per-user quotas, subscriptions, traffic tracking & auto-disable
 - **Hysteria2 performance wizard** — bandwidth measurement, QUIC window profiling, interactive parameter tuning (3-step guided setup)
-- **Multi-user support** — add, remove, enable/disable users; each gets their own VLESS link + QR code
-- **Full system optimizer** — BBR, TCP buffers, TCP keepalive, swappiness, CPU priority, OOM protection, file descriptors, journald
+- **TCP Brutal congestion control** — advanced algorithm for Hysteria2 on compatible kernels
+- **Multi-user support** — add, remove, enable/disable users; each gets their own VLESS/Hysteria2 link + QR code
+- **Full system optimizer** — BBR, TCP buffers, TCP keepalive, TCP Brutal, swappiness, CPU priority, OOM protection, file descriptors, journald
 - **Fail2ban integration** — auto-detects log backend (systemd journal vs file), protects against brute-force
-- **Live status dashboard** — every menu shows real-time state of all services
+- **Live status dashboard** — real-time service status for VLESS, Hysteria2, Auth API, Fail2ban, and TCP Brutal
 - **Safe by design** — `set -euo pipefail`, all destructive actions require confirmation
 
 ---
@@ -218,7 +220,7 @@ An interactive **3-step guide** to optimize Hysteria2 for your specific hardware
   - Valid range
   - Field to accept default or enter custom value
 
-Configurable parameters:
+Configurable parameters (QUIC & bandwidth):
 | Parameter | Purpose |
 |-----------|---------|
 | `bandwidth.up` | Maximum upload Mbit/s allowed (85% of measured, rounded) |
@@ -230,11 +232,53 @@ Configurable parameters:
 | `conn.idleTimeout` | Seconds before idle connection closes |
 | `conn.keepAliveTimeout` | Keepalive interval for NAT/firewall traversal |
 
+#### 3.3 — Hysteria2 User Management
+
+Full multi-user system with granular per-user controls:
+
+**Components:**
+- **SQLite Database** (`/etc/hysteria/users.db`) — stores user credentials, quotas, usage, expiry, enable/disable state
+- **Flask Auth API** (`/etc/hysteria/auth_api.py`) — authentication & subscription server running on port 18989
+- **Traffic Sync Script** (`/etc/hysteria/sync_traffic.py`) — periodic sync of user traffic from Hysteria2 stats API (port 18990) to database
+- **Subscription Links** — standard `hysteria2://` URLs compatible with all Hysteria2 clients
+
+**User Management Features:**
+| Feature | Description |
+|---------|-------------|
+| **Add user** | Set username, password (auto-generated), quota (0 = unlimited), expiry date |
+| **View user** | Show credentials, quota, used traffic, status, subscription link & QR code |
+| **Edit quota** | Change user's traffic limit on the fly |
+| **Enable/Disable** | Toggle user access without deletion; auto-disabled when quota exceeded |
+| **Set expiry** | Automatic user disable on specified date |
+| **Reset traffic** | Zero out user's usage counter |
+| **Delete user** | Permanently remove from database and config |
+
+**Traffic Tracking:**
+- Automatic sync every 5 minutes (configurable via cron)
+- Pulls usage stats directly from Hysteria2's built-in traffic API
+- Auto-disables users over quota (configurable behavior)
+- Tracks both upload and download bytes per user
+
+#### 3.4 — TCP Brutal Congestion Control
+
+Advanced congestion control algorithm optimized for long-distance high-latency networks:
+
+**What it does:**
+- Replaces default TCP congestion control with UDP-like aggressive bandwidth probing
+- Designed for networks with >100ms latency and packet loss
+- Faster throughput ramp-up on satellite/transoceanic links
+- Works with both Hysteria2 and can be applied system-wide for sing-box
+
+**Installation & Management:**
+- Kernel module compilation from `https://tcp.hy2.sh/`
+- Automatic kernel version detection & compatibility check
+- Can be enabled for Hysteria2 client mode or used system-wide
+
 ---
 
-### 4. User Management
+### 4. User Management (VLESS)
 
-Full lifecycle management for all VLESS users.
+Full lifecycle management for VLESS + REALITY users.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -545,8 +589,8 @@ ps aux | grep sing-box
 
 **Mehdi Hesami**
 
-- Script version: `2.3.0`
-- Protocols: VLESS + REALITY & Hysteria2 ([sing-box](https://github.com/SagerNet/sing-box), [Hysteria](https://github.com/apernet/hysteria))
+- Script version: `2.5.0`
+- Protocols: VLESS + REALITY & Hysteria2 with user management ([sing-box](https://github.com/SagerNet/sing-box), [Hysteria](https://github.com/apernet/hysteria), Flask)
 - Tested on: Ubuntu 22.04 LTS
 
 ---

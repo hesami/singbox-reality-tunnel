@@ -1,69 +1,59 @@
-<div align="center">
+# 🔒 sing-box Setup & Manager
 
-<h1>🔒 sing-box Setup & Manager</h1>
+**اسکریپت Bash تعاملی برای استقرار و مدیریت تونل‌های VLESS + REALITY و Hysteria2 با استفاده از [sing-box](https://github.com/SagerNet/sing-box)**
 
-<p>
-  <strong>A fully interactive Bash script for deploying and managing VLESS + REALITY and Hysteria2 tunnels using <a href="https://github.com/SagerNet/sing-box">sing-box</a></strong><br/>
-  Designed for the two-server bypass architecture: an <strong>outbound server</strong> (e.g. Germany) + an <strong>Iran-side client</strong>
-</p>
-
-<p>
-  <img src="https://img.shields.io/badge/version-2.5.2-blue?style=flat-square" alt="version"/>
-  <img src="https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-orange?style=flat-square" alt="platform"/>
-  <img src="https://img.shields.io/badge/protocol-VLESS%20%2B%20REALITY%20%2B%20Hysteria2-purple?style=flat-square" alt="protocol"/>
-  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license"/>
-</p>
-
-</div>
+[![version](https://img.shields.io/badge/version-3.0.0-blue?style=flat-square)](https://github.com/hesami/singbox-reality-tunnel/releases)
+[![platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-orange?style=flat-square)](https://github.com/hesami/singbox-reality-tunnel)
+[![protocol](https://img.shields.io/badge/protocol-VLESS%20%2B%20REALITY%20%2B%20Hysteria2-purple?style=flat-square)](https://github.com/hesami/singbox-reality-tunnel)
+[![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](https://github.com/hesami/singbox-reality-tunnel)
 
 ---
 
-## 📋 Table of Contents
+## 📋 فهرست مطالب
 
-- [Overview](#-overview)
-- [Architecture](#-architecture)
-- [Requirements](#-requirements)
-- [Quick Start](#-quick-start)
-- [Menu Reference](#-menu-reference)
-  - [1. Install Outbound Server](#1-install-outbound-server)
-  - [2. Install Iran Client](#2-install-iran-client)
-  - [3. Hysteria2 Setup & Performance](#3-hysteria2-setup--performance)
-  - [4. User Management](#4-user-management)
-  - [5. Status & Logs](#5-status--logs)
-  - [6. Service Management](#6-service-management)
-  - [7. Network & System Optimization](#7-network--system-optimization)
-  - [8. Fail2ban — Intrusion Protection](#8-fail2ban--intrusion-protection)
-  - [9. Speed Test](#9-speed-test)
-  - [10. Update sing-box](#10-update-sing-box)
-  - [11. Uninstall](#11-uninstall)
-- [File Structure](#-file-structure)
-- [VLESS Link Format](#-vless-link-format)
-- [Security Notes](#-security-notes)
-- [Troubleshooting](#-troubleshooting)
-- [Author](#-author)
-
----
-
-## 🌐 Overview
-
-**sing-box Setup & Manager** is an all-in-one interactive Bash script that automates every aspect of running VLESS + REALITY and Hysteria2 censorship-bypass tunnels. Instead of editing JSON configs by hand, you get a clean terminal menu that handles installation, user management, performance tuning, and intrusion protection — all in one place.
-
-### ✨ Key Highlights
-
-- **Dual-protocol support** — deploy VLESS + REALITY and/or Hysteria2 tunnels on the same server
-- **One-command deployment** — installs sing-box, generates keys, writes config, creates systemd service, opens firewall
-- **Hysteria2 user management** — SQLite database with Flask auth API, per-user quotas, subscriptions, traffic tracking & auto-disable
-- **Hysteria2 performance wizard** — bandwidth measurement, QUIC window profiling, interactive parameter tuning (3-step guided setup)
-- **TCP Brutal congestion control** — advanced algorithm for Hysteria2 on compatible kernels
-- **Multi-user support** — add, remove, enable/disable users; each gets their own VLESS/Hysteria2 link + QR code
-- **Full system optimizer** — BBR, TCP buffers, TCP keepalive, TCP Brutal, swappiness, CPU priority, OOM protection, file descriptors, journald
-- **Fail2ban integration** — auto-detects log backend (systemd journal vs file), protects against brute-force
-- **Live status dashboard** — real-time service status for VLESS, Hysteria2, Auth API, Fail2ban, and TCP Brutal
-- **Safe by design** — `set -euo pipefail`, all destructive actions require confirmation
+- [معرفی](#-معرفی)
+- [معماری](#-معماری)
+- [پیش‌نیازها](#-پیشنیازها)
+- [راه‌اندازی سریع](#-راهاندازی-سریع)
+- [ساختار ماژولار](#-ساختار-ماژولار)
+- [منوی اصلی](#-منوی-اصلی)
+  - [1. Setup Wizard](#1-setup-wizard)
+  - [2. User Management](#2-user-management)
+  - [3. Service Control](#3-service-control)
+  - [4. SSL / Domain](#4-ssl--domain)
+  - [5. Optimization](#5-optimization)
+  - [6. Security](#6-security)
+  - [7. Update Binaries](#7-update-binaries)
+  - [8. Uninstall](#8-uninstall)
+  - [9. View Logs](#9-view-logs)
+- [ساختار فایل‌ها](#-ساختار-فایلها)
+- [فرمت لینک VLESS](#-فرمت-لینک-vless)
+- [نکات امنیتی](#-نکات-امنیتی)
+- [عیب‌یابی](#-عیبیابی)
+- [نویسنده](#-نویسنده)
 
 ---
 
-## 🏗 Architecture
+## 🌐 معرفی
+
+**sing-box Setup & Manager** یک اسکریپت Bash تعاملی است که تمام مراحل نصب، پیکربندی، مدیریت کاربران و بهینه‌سازی را برای تونل‌های VLESS + REALITY و Hysteria2 خودکار می‌کند.
+
+در نسخه ۳.۰.۰ معماری اسکریپت به صورت **کاملاً ماژولار** بازنویسی شده — هر قابلیت در یک فایل مجزا قرار دارد و `manager.sh` نقطه ورودی اصلی است که تمام ماژول‌ها را بارگذاری می‌کند.
+
+### ✨ قابلیت‌های کلیدی
+
+- **پشتیبانی از دو پروتکل** — VLESS + REALITY و Hysteria2 روی یک سرور
+- **ویزارد نصب یکپارچه** — نصب خودکار، تولید کلید، پیکربندی سرویس systemd، و باز کردن فایروال
+- **مدیریت کاربر چندپروتکلی** — افزودن، حذف، فعال/غیرفعال، سهمیه ترافیک، و لینک اشتراک برای VLESS و Hysteria2
+- **پشتیبانی از SSL/TLS با Let's Encrypt** — گواهینامه رایگان از طریق acme.sh
+- **بهینه‌سازی سیستم** — BBR، بافرهای TCP، swappiness، اولویت CPU، OOM، و file descriptors
+- **Fail2ban** — محافظت در برابر حملات brute-force
+- **وضعیت real-time** — نمایش لحظه‌ای وضعیت سرویس‌های VLESS، Hysteria2، Auth/Sub، و Fail2ban در بالای منو
+- **ایمن از طراحی** — `set -euo pipefail`، تأیید اجباری برای تمام عملیات مخرب
+
+---
+
+## 🏗 معماری
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -71,12 +61,12 @@
 │              v2rayN / Hiddify / NekoBox                     │
 └────────────────────────┬────────────────────────────────────┘
                          │  VLESS + REALITY (TLS 1.3)
-                         │  Disguised as: www.google.com
+                         │  Disguised as: www.speedtest.net
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │               Outbound Server  (e.g. Germany)               │
 │                  sing-box  [inbound: VLESS]                  │
-│               This script — Option 1                        │
+│               This script — Setup Wizard → Proxy            │
 └─────────────────────────────────────────────────────────────┘
 
          ─ ─ ─ OR use two-hop relay architecture ─ ─ ─
@@ -84,11 +74,11 @@
 ┌────────────────────┐        ┌────────────────────────────────┐
 │   Client Device    │        │     Iran Relay Server          │
 │  Any SOCKS5 app    │──────▶ │  sing-box [inbound: SOCKS5]    │
-└────────────────────┘        │  This script — Option 2        │
+└────────────────────┘        │  This script — Tunnel Mode     │
                               └──────────────┬─────────────────┘
                                              │  VLESS + REALITY
                                              ▼
-                              ┌──────────────────────────────── ┐
+                              ┌─────────────────────────────────┐
                               │   Outbound Server (Germany)     │
                               │  sing-box [inbound: VLESS]      │
                               └─────────────────────────────────┘
@@ -96,315 +86,191 @@
 
 ---
 
-## 📦 Requirements
+## 📦 پیش‌نیازها
 
-| Component | Requirement |
-|-----------|-------------|
-| **OS** | Ubuntu 20.04 / 22.04 / 24.04 or Debian 11 / 12 |
-| **Architecture** | x86_64 (amd64) |
-| **User** | root or sudo |
-| **RAM** | 512 MB minimum (1 GB recommended) |
-| **Disk** | 2 GB free |
-| **Network** | Access to GitHub (for downloading sing-box binary) |
-| **Dependencies** | `curl`, `python3` (auto-installed if missing) |
+| مؤلفه | الزام |
+|---|---|
+| **OS** | Ubuntu 20.04 / 22.04 / 24.04 یا Debian 11 / 12 |
+| **معماری** | x86_64 (amd64) |
+| **کاربر** | root یا sudo |
+| **RAM** | حداقل ۵۱۲ مگابایت (۱ گیگابایت پیشنهادی) |
+| **دیسک** | ۲ گیگابایت فضای آزاد |
+| **شبکه** | دسترسی به GitHub برای دانلود باینری‌ها |
+| **وابستگی‌ها** | `curl`، `python3` (در صورت نیاز خودکار نصب می‌شوند) |
 
-> **Optional:** `qrencode` for terminal QR codes, `speedtest-cli` for speed tests — both auto-installed on demand.
+> **اختیاری:** `qrencode` برای نمایش QR code در ترمینال، `speedtest-cli` برای تست سرعت — هر دو در صورت نیاز خودکار نصب می‌شوند.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 راه‌اندازی سریع
 
 ```bash
-# Download and run as root
-wget -O singbox-manager.sh https://raw.githubusercontent.com/hesami/singbox-reality-tunnel/main/singbox-manager.sh
-chmod +x singbox-manager.sh
-sudo bash singbox-manager.sh
+# دانلود و اجرا به عنوان root
+wget -O manager.sh https://raw.githubusercontent.com/hesami/singbox-reality-tunnel/main/manager.sh
+chmod +x manager.sh
+sudo bash manager.sh
 ```
 
-Or run directly:
+یا اجرای مستقیم:
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/hesami/singbox-reality-tunnel/main/singbox-manager.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/hesami/singbox-reality-tunnel/main/manager.sh)
 ```
 
-> **Tip:** For a fresh server, run option `6 → 4 (Apply ALL optimizations)` right after installing the server.
+> **نکته:** برای یک سرور جدید، پس از نصب گزینه **5 → Apply ALL Optimizations** را اجرا کنید.
 
 ---
 
-## 📖 Menu Reference
+## 🗂 ساختار ماژولار
 
-### 1. Install Outbound Server
+در نسخه ۳.۰.۰، کد به صورت ماژولار سازمان‌یافته است. `manager.sh` تمام ماژول‌ها را در ابتدای اجرا بارگذاری می‌کند:
 
-Deploys sing-box as a **VLESS + REALITY inbound** on your outbound server (the one outside the censored region).
-
-**What it does, step by step:**
-
-1. Downloads the latest stable (or pre-release) sing-box binary from GitHub
-2. Prompts for configuration:
-   - **UUID** — auto-generated, or enter your own
-   - **Listen port** — default `443`
-   - **SNI** — camouflage domain (default: `www.speedtest.net` for better blending with legitimate TLS traffic)
-   - **Short ID** — REALITY handshake identifier (auto-generated as 8 hex chars)
-3. Generates a fresh REALITY **keypair** (private + public key)
-4. Writes `/etc/sing-box/config.json`
-5. Saves server info to `/etc/sing-box/server.json` (used by other menu options)
-6. Creates and enables `sing-box.service` (systemd) with improved restart limits and timeout settings
-7. Opens the listen port in UFW / iptables
-8. Starts the service and verifies it is running
-9. Prints the complete **VLESS link** and shows a **terminal QR code**
-
-**Output example:**
 ```
-vless://xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx@1.2.3.4:443
-  ?encryption=none&flow=xtls-rprx-vision&security=reality
-  &sni=www.google.com&fp=chrome&pbk=<publickey>
-  &sid=a1b2c3d4&type=tcp&headerType=none
-  #Germany-Server
+manager.sh              ← نقطه ورودی اصلی + منوی اصلی
+│
+├── core/
+│   ├── common.sh       ← رنگ‌ها، توابع چاپ، menu_prompt
+│   ├── system.sh       ← بررسی root، نصب وابستگی‌ها
+│   └── db.sh           ← مدیریت پایگاه داده SQLite کاربران
+│
+├── protocols/
+│   ├── vless.sh        ← نصب، به‌روزرسانی، حذف VLESS + REALITY
+│   └── hysteria2.sh    ← نصب، به‌روزرسانی، حذف Hysteria2
+│
+├── features/
+│   ├── ssl.sh          ← مدیریت گواهینامه SSL با acme.sh
+│   ├── users.sh        ← مدیریت کاربران (VLESS + Hysteria2)
+│   ├── optimization.sh ← BBR، TCP، swap، CPU، FD
+│   └── security.sh     ← Fail2ban
+│
+└── wizard/
+    ├── install.sh      ← ویزارد نصب تعاملی
+    └── tunnel.sh       ← پیکربندی تونل relay
 ```
 
 ---
 
-### 2. Install Iran Client
+## 📖 منوی اصلی
 
-Deploys sing-box as a **local SOCKS5 proxy** that tunnels traffic to the outbound server. Useful for relay setups or running a proxy on an Iran-side server.
-
-**Prompts for:**
-- Outbound server IP and port
-- UUID, PublicKey, Short ID, SNI (copy from Option 1 output)
-- Local SOCKS5 port (default: `10808`)
-
-**After install:** Automatically tests the tunnel by fetching the outbound IP through the SOCKS5 proxy and reports success/failure.
-
-**systemd service:** `sing-box-client.service`
-
----
-
-### 3. Hysteria2 Setup & Performance
-
-Deploys and optimizes **Hysteria2** — a high-performance QUIC-based tunnel protocol designed to bypass advanced network filtering and DPI detection.
-
-#### 3.1 — Install Hysteria2 Server
-
-Automated installation of the Hysteria2 binary and systemd service:
-
-1. Fetches the latest Hysteria2 release from GitHub (`apernet/hysteria`)
-2. Installs binary to `/usr/local/bin/hysteria`
-3. Creates `/etc/hysteria/config.yaml` and `/etc/hysteria/server.json` for server identity
-4. Configures `hysteria-server.service` systemd unit with:
-   - Improved restart behavior (`StartLimitIntervalSec=60`, `StartLimitBurst=5`)
-   - Extended stop timeout (`TimeoutStopSec=20`) for graceful shutdown
-   - Automatic restart on failure
-5. Enables and starts the service
-6. Opens the configured UDP port in the firewall
-
-#### 3.2 — Hysteria2 Performance Wizard
-
-An interactive **3-step guide** to optimize Hysteria2 for your specific hardware and network conditions:
-
-**Step 1: Bandwidth Measurement**
-- Native measurement using `curl` against Cloudflare edge servers
-- Tests both download (50 MB) and upload (10 MB) speed
-- No external speedtest tools needed — fast and reliable
-- Displays results in Mbit/s
-
-**Step 2: System Resource Analysis**
-- Detects available RAM and selects appropriate QUIC window profile:
-  - **Large** (≥4 GB): 32–128 MB windows for high-throughput servers
-  - **Medium** (2 GB): 16–64 MB windows for standard VPS
-  - **Small** (1 GB): 8–32 MB windows for resource-constrained instances
-
-**Step 3: Interactive Parameter Tuning**
-- Each parameter explained with:
-  - Description of its purpose
-  - Recommended value based on bandwidth & RAM
-  - Valid range
-  - Field to accept default or enter custom value
-
-Configurable parameters (QUIC & bandwidth):
-| Parameter | Purpose |
-|-----------|---------|
-| `bandwidth.up` | Maximum upload Mbit/s allowed (85% of measured, rounded) |
-| `bandwidth.down` | Maximum download Mbit/s allowed |
-| `quic.initStreamReceiveWindow` | Initial stream buffer (affects ramp-up speed) |
-| `quic.maxStreamReceiveWindow` | Maximum stream buffer |
-| `quic.initConnReceiveWindow` | Initial connection buffer |
-| `quic.maxConnReceiveWindow` | Maximum connection buffer |
-| `conn.idleTimeout` | Seconds before idle connection closes |
-| `conn.keepAliveTimeout` | Keepalive interval for NAT/firewall traversal |
-
-#### 3.3 — Hysteria2 User Management
-
-Full multi-user system with granular per-user controls and automatic traffic tracking.
-
-##### 3.3.0 — Components
-
-- **SQLite Database** (`/etc/hysteria/users.db`) \u2014 stores user credentials, quotas, usage, expiry, enable/disable state
-- **Flask Auth API** (`/etc/hysteria/auth_api.py`) \u2014 authentication & subscription server running on port 18989 (auto-opened in firewall)
-- **Traffic Sync Script** (`/etc/hysteria/sync_traffic.py`) \u2014 periodic sync (every 2 minutes) of user traffic from Hysteria2 stats API (port 18990) to database
-- **Subscription Links** \u2014 standard `hysteria2://` URLs compatible with all Hysteria2 clients
-
-##### 3.3.1 — Installation & Automatic Setup
-
-The user management setup includes 7 automated steps with intelligent error recovery:
-
-1. **SQLite database initialization** \u2014 creates `/etc/hysteria/users.db` schema for user storage
-2. **Auth API deployment** \u2014 writes and starts Flask authentication service
-3. **Traffic sync script** \u2014 generates Python daemon for quota enforcement
-4. **Config patching** \u2014 adds `trafficStats` API and HTTP auth to Hysteria2 config
-5. **Auth service startup** \u2014 starts `hysteria-auth` systemd service with health checks and auto-retry
-6. **Firewall rules** \u2014 automatically opens port 18989 (UFW/iptables) for client subscriptions
-7. **Cron installation & verification** \u2014 installs traffic sync with dual-method robustness (crontab + /etc/cron.d fallback)
-
-**Automatic post-install verification performs 8 checks:**
-- hysteria-server status (\u2714 running or \u2717 failed)
-- hysteria-auth service operational
-- trafficStats API present in config
-- Stats API responding on port 18990
-- Auth API responding on port 18989 with `/health` endpoint
-- Cron job properly installed (both methods checked)
-- Cron service running and active
-- Sync log created and monitoring
-
-If any check fails, automatic remediation is attempted and full status report displayed. Initial sync run immediately to verify database connectivity.
-
-##### 3.3.2 — User Management Features
-| Feature | Description |
-|---------|-------------|
-| **Add user** | Set username, password (auto-generated), quota (0 = unlimited), expiry date |
-| **View user** | Show credentials, quota, used traffic, status, subscription link & QR code |
-| **Edit quota** | Change user's traffic limit on the fly |
-| **Enable/Disable** | Toggle user access without deletion; auto-disabled when quota exceeded |
-| **Set expiry** | Automatic user disable on specified date |
-| **Reset traffic** | Zero out user's usage counter |
-| **Delete user** | Permanently remove from database and config |
-
-**Traffic Tracking & Cron Robustness:**
-- Automatic sync every 2 minutes via cron with intelligent service detection
-- **Smart cron installation:**
-  * Auto-detects cron vs crond service name
-  * Enables and starts service automatically
-  * Attempts recovery if first start fails
-  * Falls back to `/etc/cron.d/` if crontab fails
-  * Verifies installation by reading crontab after write
-- Pulls usage stats directly from Hysteria2's built-in traffic API (port 18990)
-- Auto-disables users exceeding quota (configurable behavior)
-- Tracks both upload and download bytes per user
-- Health-check logging to `/var/log/hysteria-sync.log` with line counts
-- Runs initial sync immediately after setup to verify database connectivity
-
-#### 3.4 — TCP Brutal Congestion Control
-
-Advanced congestion control algorithm optimized for long-distance high-latency networks:
-
-**What it does:**
-- Replaces default TCP congestion control with UDP-like aggressive bandwidth probing
-- Designed for networks with >100ms latency and packet loss
-- Faster throughput ramp-up on satellite/transoceanic links
-- Works with both Hysteria2 and can be applied system-wide for sing-box
-
-**Installation & Management:**
-- Kernel module compilation from `https://tcp.hy2.sh/`
-- Automatic kernel version detection & compatibility check
-- Can be enabled for Hysteria2 client mode or used system-wide
-
----
-
-### 4. User Management (VLESS)
-
-Full lifecycle management for VLESS + REALITY users.
+در بالای هر منو، یک **نوار وضعیت real-time** نمایش داده می‌شود:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│  No.  UUID                                  Label                Quota        Used    Status │
-│  ───────────────────────────────────────────────────────────────────────────────────────────│
-│  1    550e8400-e29b-41d4-a716-446655440000  default              Unlimited    0.0 MB  ON     │
-│  2    6ba7b810-9dad-11d1-80b4-00c04fd430c8  Alice                50 GB        12.4 GB ON     │
-│  3    6ba7b811-9dad-11d1-80b4-00c04fd430c8  Bob                  10 GB        9.8 GB  OFF    │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
+ Services : ● VLESS ○ Hysteria2 ● Auth/Sub ● Fail2ban
+ Users    : 5  Domain: vpn.example.com
 ```
-
-| Option | Description |
-|--------|-------------|
-| **Add new user** | Generates UUID, sets label and optional traffic quota; prints VLESS link + QR |
-| **View user details** | Shows full info + VLESS link + QR code for any user |
-| **Edit quota** | Change a user's traffic quota (0 = unlimited) |
-| **Enable / Disable** | Toggles user in the running config; takes effect immediately without restart |
-| **Delete user** | Removes from both config and database; requires confirmation |
-| **Reset traffic counter** | Zeroes the `used_bytes` counter in the database |
-
-**Storage:** User data is persisted in `/etc/sing-box/users.json`. The running config at `/etc/sing-box/config.json` is always kept in sync.
 
 ---
 
-### 5. Status & Logs
+### 1. Setup Wizard
 
-Displays a real-time overview:
+ویزارد تعاملی برای نصب اولیه. دو حالت را پوشش می‌دهد:
 
-- Active/inactive state of `sing-box` and `sing-box-client`
-- Installed sing-box version
-- Server info (PublicKey, SNI, Port) from `server.json`
-- Last 10 lines of journal log for each active service
+**حالت Proxy (سرور outbound):**
+1. دانلود آخرین نسخه stable یا pre-release sing-box از GitHub
+2. دریافت پارامترها از کاربر: UUID (خودکار یا دستی)، پورت (پیش‌فرض: `443`)، SNI (پیش‌فرض: `www.speedtest.net`)، Short ID
+3. تولید keypair جدید REALITY
+4. نوشتن `/etc/sing-box/config.json` و `/etc/sing-box/server.json`
+5. ایجاد و فعال‌سازی سرویس systemd
+6. باز کردن پورت در UFW / iptables
+7. نمایش **لینک VLESS** کامل + **QR code**
 
----
-
-### 6. Service Management
-
-Control sing-box without leaving the script:
-
-| Option | Action |
-|--------|--------|
-| Start | `systemctl start` |
-| Stop | `systemctl stop` |
-| Restart | `systemctl restart` |
-| Live log | `journalctl -u sing-box -f` (Ctrl+C to exit) |
-| Switch service | Toggle between `sing-box` and `sing-box-client` |
+**حالت Tunnel (relay):**
+- استقرار sing-box به عنوان یک پروکسی SOCKS5 محلی که ترافیک را به سرور outbound هدایت می‌کند
+- تست خودکار تونل پس از نصب
+- سرویس systemd: `sing-box-client.service`
 
 ---
 
-### 7. Network & System Optimization
+### 2. User Management
 
-A three-level optimization suite designed to keep sing-box stable and fast on low-resource VPS servers (1 vCPU / 1 GB RAM). The top of the menu shows a **live status summary** of all subsystems.
+مدیریت کامل چرخه کاربران برای هر دو پروتکل:
 
 ```
-  Network:  BBR [ON]  qdisc:fq  buffers: optimized  keepalive: enabled
-  System:   swappiness:10  sing-box nice:-5
-  Storage:  journal:18.5M  fd-limit:1048576
+┌──────────────────────────────────────────────────────────────────────────┐
+│  No.  UUID / Username          Label     Quota        Used     Status    │
+│  ────────────────────────────────────────────────────────────────────────│
+│  1    550e8400...440000        default   Unlimited    0.0 MB   ON        │
+│  2    alice                   Alice     50 GB        12.4 GB  ON        │
+│  3    bob                     Bob       10 GB        9.8 GB   OFF       │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 7.1 — Network: BBR & TCP
+| گزینه | توضیح |
+|---|---|
+| **افزودن کاربر** | تولید UUID/رمز، تنظیم label، سهمیه ترافیک، تاریخ انقضا — چاپ لینک + QR |
+| **مشاهده جزئیات** | نمایش اطلاعات کامل + لینک اشتراک + QR code |
+| **ویرایش سهمیه** | تغییر لحظه‌ای سهمیه ترافیک (۰ = نامحدود) |
+| **فعال / غیرفعال** | تغییر وضعیت بدون نیاز به ری‌استارت سرویس |
+| **تنظیم انقضا** | غیرفعال‌سازی خودکار کاربر در تاریخ مشخص |
+| **ریست ترافیک** | صفر کردن شمارنده مصرف کاربر |
+| **حذف کاربر** | حذف دائمی از پایگاه داده و پیکربندی |
 
-| Option | What it does |
-|--------|-------------|
-| **Enable BBR + FQ** | Sets `tcp_congestion_control=bbr` and `default_qdisc=fq`; checks kernel support |
-| **Disable BBR** | Reverts to `cubic` |
-| **TCP buffer & keepalive optimization** | Raises `rmem_max` / `wmem_max` to 128 MB; sets `tcp_fastopen=3`, `tcp_mtu_probing=1`, `tcp_slow_start_after_idle=0`, `tcp_no_metrics_save=1`; enables keepalive with tuned intervals for NAT/firewall stability |
-| **Apply both** | BBR + TCP buffers & keepalive in one step |
-| **Show values** | Prints all relevant sysctl keys with current values |
+**ذخیره‌سازی:** داده کاربران در `/etc/sing-box/users.json` (VLESS) و SQLite در `/etc/hysteria/users.db` (Hysteria2) نگه‌داری می‌شود.
 
-**New in v2.3.0:** TCP keepalive settings (`tcp_keepalive_time=60`, `tcp_keepalive_intvl=10`, `tcp_keepalive_probes=6`, `tcp_fin_timeout=15`) keep idle connections alive through NAT/firewall translation layers, critical for long-lived proxy connections.
+---
 
-#### 7.2 — System: Memory & CPU Priority
+### 3. Service Control
 
-| Option | What it does |
-|--------|-------------|
-| **Optimize swap behavior** | `vm.swappiness=10`, `vm.vfs_cache_pressure=50` — kernel avoids swap until RAM is >90% full |
-| **CPU priority** | Sets `Nice=-5` for sing-box via systemd drop-in; applies to running process immediately with `renice` |
-| **OOM protection** | Sets `OOMScoreAdjust=-500` — Linux OOM killer will spare sing-box even under extreme memory pressure |
-| **Apply all system** | All three above in one step |
-| **Show info** | Live view of RAM, swap, load average, and sing-box process stats (PID, memory, CPU%, nice, OOM score) |
+کنترل تمام سرویس‌ها از یک منو:
 
-#### 7.3 — Storage: Logging & File Descriptors
+| سرویس | توضیح |
+|---|---|
+| `sing-box` | سرور VLESS + REALITY |
+| `sing-box-client` | کلاینت تونل relay |
+| `hysteria-server` | سرور Hysteria2 |
+| `hysteria-auth` | سرویس Auth + Subscription API |
 
-| Option | What it does |
-|--------|-------------|
-| **Limit journald** | Caps journal at 50 MB (`SystemMaxUse=50M`); vacuums existing logs immediately; backs up original `journald.conf` |
-| **File descriptors** | Raises `fs.file-max` to 1,048,576; sets PAM `nofile` limits; adds `LimitNOFILE=1048576` to systemd service drop-in |
-| **Apply both** | Journal + FD in one step |
-| **Show info** | Disk usage, journal size/limit, system fd limit, sing-box open fd count |
+برای هر سرویس: **Start، Stop، Restart، مشاهده live log** (Ctrl+C برای خروج)
 
-#### 7.4 — Apply ALL Optimizations ⭐
+همچنین گزینه **Restart ALL** برای ری‌استارت یکجای تمام سرویس‌های فعال.
 
-Runs all 6 steps in sequence with progress indicators. **Recommended after a fresh server install.**
+---
+
+### 4. SSL / Domain
+
+مدیریت گواهینامه SSL رایگان از طریق **acme.sh** و Let's Encrypt:
+
+- صدور گواهینامه برای دامنه دلخواه
+- تمدید خودکار با cron
+- تنظیم hook برای ری‌لود سرویس‌ها پس از تمدید
+- حذف و ابطال گواهینامه
+
+پس از تنظیم دامنه، نام دامنه در نوار وضعیت بالای منو نمایش داده می‌شود.
+
+---
+
+### 5. Optimization
+
+یک مجموعه بهینه‌سازی سه‌سطحی برای سرورهای VPS با منابع محدود:
+
+#### 5.1 — شبکه: BBR و TCP
+
+| گزینه | عملکرد |
+|---|---|
+| **Enable BBR + FQ** | تنظیم `tcp_congestion_control=bbr` و `default_qdisc=fq` |
+| **Disable BBR** | بازگشت به `cubic` |
+| **TCP buffer & keepalive** | افزایش `rmem_max`/`wmem_max` به ۱۲۸ MB؛ فعال‌سازی `tcp_fastopen`، `tcp_mtu_probing`، keepalive با تنظیمات بهینه |
+| **Show values** | نمایش مقادیر فعلی sysctl |
+
+#### 5.2 — سیستم: حافظه و اولویت CPU
+
+| گزینه | عملکرد |
+|---|---|
+| **Optimize swap** | `vm.swappiness=10`، `vm.vfs_cache_pressure=50` |
+| **CPU priority** | تنظیم `Nice=-5` برای sing-box در systemd |
+| **OOM protection** | `OOMScoreAdjust=-500` — کرنل sing-box را kill نمی‌کند |
+| **Apply all** | هر سه گزینه با یک دستور |
+
+#### 5.3 — ذخیره‌سازی: لاگ و File Descriptors
+
+| گزینه | عملکرد |
+|---|---|
+| **Limit journald** | محدودیت ۵۰ MB برای journal؛ vacuum فوری |
+| **File descriptors** | افزایش `fs.file-max` به ۱،۰۴۸،۵۷۶ |
+
+#### 5.4 — Apply ALL Optimizations ⭐
+
+اجرای ۶ مرحله به ترتیب با نشانگر پیشرفت. **پیشنهاد: بلافاصله بعد از نصب اجرا شود.**
 
 ```
 ── 1/6  BBR + FQ ──────────────────
@@ -415,136 +281,131 @@ Runs all 6 steps in sequence with progress indicators. **Recommended after a fre
 ── 6/6  Journald Size ─────────────
 ```
 
-#### 7.5 — Reset ALL to Defaults
+#### 5.5 — Reset ALL to Defaults
 
-Cleanly removes every optimization this script applied:
-- Strips all added lines from `/etc/sysctl.conf`
-- Restores `journald.conf` from backup
-- Removes PAM `nofile` entries from `/etc/security/limits.conf`
-- Deletes the systemd service drop-in directory
-- Reloads all affected daemons
+حذف کامل تمام بهینه‌سازی‌های اعمال‌شده و بازگشت به وضعیت اولیه سیستم.
 
 ---
 
-### 8. Fail2ban — Intrusion Protection
+### 6. Security
 
-Protects the server from brute-force and invalid REALITY handshake attacks.
+محافظت در برابر حملات brute-force با **Fail2ban**:
 
-**Smart log detection:** Automatically determines whether to use the `systemd` journal backend or a file-based backend (`/var/log/sing-box/sing-box.log`) depending on what is available — no manual configuration needed.
+تشخیص خودکار backend لاگ (journal systemd یا فایل `/var/log/sing-box/sing-box.log`).
 
-| Option | Description |
-|--------|-------------|
-| **Install & configure** | Installs fail2ban + rsyslog (if needed), sets up sing-box log file, writes filter and jail config, starts service |
-| **Show banned IPs** | Lists all currently banned IPs from the `singbox` jail |
-| **Unban an IP** | Removes a specific IP from the ban list |
-| **Change ban settings** | Update `maxretry`, `findtime`, `bantime` while preserving the existing backend |
-| **Start / Stop** | Toggle fail2ban service |
-| **Show live log** | `tail -f /var/log/fail2ban.log` |
-| **Uninstall** | Removes fail2ban, cleans up all config files, rsyslog rules, and logrotate entries |
+| گزینه | توضیح |
+|---|---|
+| **Install & configure** | نصب fail2ban + rsyslog، تنظیم فیلتر و jail |
+| **Show banned IPs** | لیست تمام IPهای مسدود شده |
+| **Unban an IP** | رفع مسدودیت یک IP خاص |
+| **Change ban settings** | تغییر `maxretry`، `findtime`، `bantime` |
+| **Start / Stop** | کنترل سرویس fail2ban |
+| **Show live log** | نمایش `tail -f /var/log/fail2ban.log` |
+| **Uninstall** | حذف کامل fail2ban و تمام فایل‌های پیکربندی |
 
-**Default ban settings:**
+**تنظیمات پیش‌فرض:**
+
 ```
-maxretry = 5 attempts
-findtime = 60 seconds
-bantime  = 3600 seconds (1 hour)
-action   = iptables-allports (blocks all ports, not just VLESS)
+maxretry = 5 تلاش
+findtime = 60 ثانیه
+bantime  = 3600 ثانیه (۱ ساعت)
+action   = iptables-allports (مسدود کردن تمام پورت‌ها)
 ```
 
-**Filter regex** targets REALITY invalid connection log entries from sing-box.
+---
+
+### 7. Update Binaries
+
+به‌روزرسانی باینری‌ها بدون از دست دادن پیکربندی:
+
+```
+ sing-box  : 1.10.2
+ hysteria2 : 2.6.0
+```
+
+| گزینه | توضیح |
+|---|---|
+| **Update sing-box** | دانلود آخرین نسخه از GitHub، جایگزینی باینری |
+| **Update Hysteria2** | به‌روزرسانی باینری Hysteria2 |
+| **Update both** | هر دو با یک دستور |
+| **Update this manager** | دانلود آخرین نسخه تمام ماژول‌ها از GitHub با بکاپ خودکار |
+
+**Self-Update:** فایل‌های بکاپ با timestamp ذخیره می‌شوند. در صورت شکست بیش از ۳ فایل، عملیات لغو می‌شود.
 
 ---
 
-### 9. Speed Test
+### 8. Uninstall
 
-Two testing modes:
+حذف انتخابی یا کامل:
 
-| Mode | Tool | What it measures |
-|------|------|-----------------|
-| **Full speed test** | `speedtest-cli` | Download, upload, ping via Speedtest.net |
-| **Quick test** | `curl` + `ping` | Download 10 MB & 50 MB from Cloudflare; latency to 1.1.1.1 and 8.8.8.8 |
+| گزینه | توضیح |
+|---|---|
+| **Remove VLESS + Reality** | حذف sing-box و پیکربندی آن |
+| **Remove Hysteria2** | حذف hysteria-server و پیکربندی |
+| **Remove EVERYTHING** | ریست کامل — تمام باینری‌ها، پیکربندی‌ها، کاربران، SSL، cron، sysctl، fail2ban |
 
-`speedtest-cli` is auto-installed if not present.
-
----
-
-### 10. Update sing-box
-
-Updates the sing-box binary in-place:
-
-1. Fetches latest version tag from GitHub API
-2. Shows current vs. new version
-3. Stops both services, installs new binary, restarts
-4. Works for both stable and pre-release channels
+> ⚠️ عملیات **برگشت‌ناپذیر** است. اسکریپت قبل از اجرا تأیید صریح می‌خواهد.
 
 ---
 
-### 11. Uninstall
+### 9. View Logs
 
-Completely removes all traces of sing-box:
-
-- Stops and disables both systemd services
-- Deletes service unit files and drop-ins
-- Removes the sing-box binary (`/usr/local/bin/sing-box`)
-- Deletes the entire `/etc/sing-box/` directory (config, keys, user database)
-- Runs `systemctl daemon-reload`
-
-> ⚠️ This action is **irreversible**. The script asks for explicit confirmation before proceeding.
+| گزینه | توضیح |
+|---|---|
+| **VLESS server log** | `journalctl -u sing-box -f` |
+| **Hysteria2 server log** | `journalctl -u hysteria-server -f` |
+| **Auth + Sub API log** | `journalctl -u hysteria-auth -f` |
+| **Traffic sync log** | آخرین ۵۰ خط از لاگ sync ترافیک |
+| **Manager log** | لاگ داخلی manager |
+| **Fail2ban log** | `journalctl -u fail2ban -f` |
 
 ---
 
-## 📁 File Structure
+## 📁 ساختار فایل‌ها
 
 ```
 /usr/local/bin/
-├── sing-box                         # Binary
-└── hysteria                         # Hysteria2 binary (if installed)
+├── sing-box                         # باینری sing-box
+└── hysteria                         # باینری Hysteria2
 
 /etc/sing-box/
-├── config.json                      # Running configuration (VLESS inbounds/outbounds)
-├── server.json                      # Server identity (keypair, SNI, port)
-└── users.json                       # User database (uuid, label, quota, usage)
+├── config.json                      # پیکربندی VLESS (inbound/outbound)
+├── server.json                      # هویت سرور (keypair، SNI، پورت)
+└── users.json                       # پایگاه داده کاربران VLESS
 
 /etc/hysteria/
-├── config.yaml                      # Hysteria2 server configuration (with trafficStats & HTTP auth)
-├── server.json                      # Hysteria2 server identity (IP, port, domain)
-├── users.db                         # SQLite database for user credentials, quotas, expiry
-├── auth_api.py                      # Flask auth service + subscription endpoint
-├── sync_traffic.py                  # Traffic sync daemon (runs via cron)
-└── tls/                             # TLS certs directory (if applicable)
+├── config.yaml                      # پیکربندی Hysteria2
+├── server.json                      # هویت سرور Hysteria2
+├── users.db                         # SQLite: اعتبارنامه، سهمیه، انقضا
+├── auth_api.py                      # Flask auth + subscription (پورت 18989)
+└── sync_traffic.py                  # sync ترافیک (هر ۲ دقیقه یک‌بار)
+
+/etc/singbox-manager/
+├── domain.conf                      # تنظیمات دامنه و SSL
+└── ssl_reload_hook.sh               # hook تمدید خودکار SSL
 
 /etc/systemd/system/
-├── sing-box.service                 # Server systemd unit (VLESS)
-├── sing-box-client.service          # Client systemd unit
-├── hysteria-server.service          # Hysteria2 server systemd unit (if installed)
+├── sing-box.service                 # سرویس VLESS
+├── sing-box-client.service          # سرویس کلاینت تونل
+├── hysteria-server.service          # سرویس Hysteria2
+├── hysteria-auth.service            # سرویس Auth/Sub API
 └── sing-box.service.d/
-    └── priority.conf                # CPU/OOM/FD drop-in (created by optimizer)
+    └── priority.conf                # drop-in CPU/OOM/FD
 
-/var/log/sing-box/
-└── sing-box.log                     # Log file (created by fail2ban installer)
-
-/var/log/
-└── hysteria-sync.log                # Traffic sync daemon log (health checks & quota updates)
-
-/etc/cron.d/
-└── hysteria-sync                    # Cron job fallback (if crontab write fails)
+/var/log/singbox-manager/
+├── hy2_sync.log                     # لاگ sync ترافیک Hysteria2
+└── vless_sync.log                   # لاگ sync ترافیک VLESS
 
 /etc/fail2ban/
-├── jail.local                       # Fail2ban jail config
-└── filter.d/
-    └── singbox.conf                 # Fail2ban filter for REALITY/Hysteria2 logs
-
-/etc/logrotate.d/
-└── sing-box                         # Log rotation config
-
-/etc/rsyslog.d/
-└── 50-sing-box.conf                 # rsyslog forwarding rule (if applicable)
+├── jail.local                       # پیکربندی jail
+└── filter.d/singbox.conf            # فیلتر لاگ REALITY/Hysteria2
 ```
 
 ---
 
-## 🔗 VLESS Link Format
+## 🔗 فرمت لینک VLESS
 
-Links generated by this script are compatible with **v2rayN**, **Hiddify**, **NekoBox**, **v2rayNG**, and other standard VLESS clients.
+لینک‌های تولیدشده با **v2rayN**، **Hiddify**، **NekoBox**، **v2rayNG** و سایر کلاینت‌های VLESS استاندارد سازگار هستند:
 
 ```
 vless://<UUID>@<SERVER_IP>:<PORT>
@@ -560,85 +421,74 @@ vless://<UUID>@<SERVER_IP>:<PORT>
   #<LABEL>
 ```
 
-| Parameter | Description |
-|-----------|-------------|
-| `flow` | `xtls-rprx-vision` — required for REALITY |
-| `security` | `reality` — TLS 1.3 with REALITY handshake |
-| `sni` | Camouflage domain (e.g. `www.google.com`) |
-| `fp` | TLS fingerprint — `chrome` |
-| `pbk` | Server's REALITY public key |
-| `sid` | Short ID for handshake verification |
+| پارامتر | توضیح |
+|---|---|
+| `flow` | `xtls-rprx-vision` — الزامی برای REALITY |
+| `security` | `reality` — TLS 1.3 با handshake REALITY |
+| `sni` | دامنه camouflage (مثلاً `www.speedtest.net`) |
+| `fp` | اثر انگشت TLS — `chrome` |
+| `pbk` | کلید عمومی REALITY سرور |
+| `sid` | Short ID برای تأیید handshake |
 
 ---
 
-## 🔐 Security Notes
+## 🔐 نکات امنیتی
 
-- **REALITY private key** is stored only on the server in `/etc/sing-box/server.json`. Never share it.
-- **UUID** acts as the user credential — treat it like a password.
-- The script uses `set -euo pipefail` — it exits immediately on any unexpected error.
-- All destructive operations (delete user, uninstall, reset) require explicit `y/n` confirmation.
-- Fail2ban's `iptables-allports` action blocks **all ports** for a banned IP, not just the VLESS port.
-- The OOM score adjustment (`-500`) ensures the kernel will never kill sing-box due to memory pressure — even on a 512 MB VPS.
+- **کلید خصوصی REALITY** فقط در سرور در `/etc/sing-box/server.json` ذخیره می‌شود. هرگز آن را به اشتراک نگذارید.
+- **UUID** به عنوان credential کاربر عمل می‌کند — مثل رمز عبور با آن رفتار کنید.
+- اسکریپت از `set -euo pipefail` استفاده می‌کند — در صورت بروز هر خطای غیرمنتظره بلافاصله متوقف می‌شود.
+- تمام عملیات مخرب (حذف کاربر، uninstall، ریست کامل) نیاز به تأیید صریح `y/n` دارند.
+- `iptables-allports` در Fail2ban تمام پورت‌ها را برای IP مسدود مسدود می‌کند.
+- تنظیم OOM score به `-500` تضمین می‌کند که کرنل sing-box را به دلیل فشار حافظه kill نمی‌کند.
 
 ---
 
-## 🛠 Troubleshooting
+## 🛠 عیب‌یابی
 
-**Service fails to start after install:**
+**سرویس بعد از نصب راه‌اندازی نمی‌شود:**
 ```bash
 journalctl -u sing-box --no-pager -n 30
 ```
 
-**Check if port is already in use:**
+**بررسی اشغال بودن پورت:**
 ```bash
 ss -tlnp | grep :443
 ```
 
-**Test VLESS connectivity manually:**
+**تست اتصال VLESS به صورت دستی:**
 ```bash
 curl -v --connect-timeout 5 https://<SERVER_IP>
-# Should return a TLS connection (mimicking the SNI site)
+# باید یک اتصال TLS برگرداند (شبیه‌سازی سایت SNI)
 ```
 
-**Fail2ban not starting:**
+**Fail2ban راه‌اندازی نمی‌شود:**
 ```bash
 journalctl -u fail2ban --no-pager -n 30
 fail2ban-client --test
 ```
 
-**High ping / packet loss from the server:**
+**پینگ بالا یا packet loss:**
 ```bash
-# Check CPU steal time (high steal = noisy VPS neighbor)
-top   # look for the 'st' column in the CPU line
+# بررسی CPU steal time (steal بالا = همسایه نویزی در VPS)
+top   # به ستون 'st' در خط CPU توجه کنید
 
-# Check if BBR is actually active
+# تأیید فعال بودن BBR
 sysctl net.ipv4.tcp_congestion_control
 
-# Check memory pressure
+# بررسی فشار حافظه
 free -m
-cat /proc/meminfo | grep -i swap
-```
-
-**sing-box memory usage:**
-```bash
-ps aux | grep sing-box
-# Or use option 6 → 2 → 5 (Show memory & CPU info)
 ```
 
 ---
 
-## 👤 Author
+## 👤 نویسنده
 
 **Mehdi Hesami**
 
-- Script version: `2.5.2`
-- Protocols: VLESS + REALITY & Hysteria2 with user management ([sing-box](https://github.com/SagerNet/sing-box), [Hysteria](https://github.com/apernet/hysteria), Flask)
-- Tested on: Ubuntu 22.04 LTS
+- نسخه اسکریپت: `3.0.0`
+- پروتکل‌ها: VLESS + REALITY و Hysteria2
+- تست‌شده روی: Ubuntu 22.04 LTS
 
 ---
 
-<div align="center">
-
-If this project helped you, consider giving it a ⭐ on GitHub.
-
-</div>
+اگر این پروژه برایتان مفید بود، با دادن ⭐ در GitHub حمایت کنید.

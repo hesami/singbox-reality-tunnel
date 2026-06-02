@@ -168,7 +168,7 @@ def main():
     conn   = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     config = load_json(CONFIG_FILE)
-    now    = datetime.datetime.utcnow().isoformat()
+    now    = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     changed = False
 
@@ -183,7 +183,7 @@ def main():
         if row["expires_at"]:
             try:
                 exp = datetime.datetime.fromisoformat(row["expires_at"])
-                expired = exp < datetime.datetime.utcnow()
+                expired = exp < datetime.datetime.now(datetime.timezone.utc)
             except Exception:
                 pass
 
@@ -342,7 +342,7 @@ def main():
         return
 
     conn = sqlite3.connect(DB_PATH)
-    now  = datetime.datetime.utcnow().isoformat()
+    now  = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
         for uuid, delta in totals.items():
             rows = conn.execute(

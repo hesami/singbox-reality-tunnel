@@ -281,7 +281,7 @@ import sqlite3, os, datetime
 
 db_path = os.environ["DB_PATH"]
 conn    = sqlite3.connect(db_path)
-now     = datetime.datetime.utcnow().isoformat()
+now     = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 # Add to cumulative used_bytes
 conn.execute("UPDATE users SET used_bytes = used_bytes + ? WHERE uuid=?",
@@ -342,7 +342,7 @@ import sqlite3, os, json, datetime
 
 db_path = os.environ["DB_PATH"]
 conn    = sqlite3.connect(db_path)
-now     = datetime.datetime.utcnow().isoformat()
+now     = datetime.datetime.now(datetime.timezone.utc).isoformat()
 rows    = conn.execute(
     "SELECT uuid FROM users WHERE expires_at IS NOT NULL AND expires_at <= ? AND enabled=1",
     (now,)
@@ -401,7 +401,7 @@ for i, row in enumerate(rows, 1):
         try:
             dt = datetime.datetime.fromisoformat(exp)
             exp = dt.strftime("%Y-%m-%d")
-            if dt < datetime.datetime.utcnow():
+            if dt < datetime.datetime.now(datetime.timezone.utc):
                 exp = f"{RED}{exp}{NC}"
         except:
             pass

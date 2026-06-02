@@ -17,35 +17,31 @@ ssl_install_acme() {
         print_info "acme.sh already installed."
         return 0
     fi
-    print_info "Installing dependencies for acme.sh..."
-    apt-get update -qq &>/dev/null
-    apt-get install -y curl socat git openssl cron &>/dev/null \
-        || apt-get install -y curl socat openssl cron &>/dev/null || true
 
-    # Ensure cron is running (needed for auto-renewal)
+    print_info "Installing dependencies..."
+    apt-get update -qq &>/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl socat git openssl cron &>/dev/null || true
     systemctl enable cron  &>/dev/null || systemctl enable crond  &>/dev/null || true
     systemctl start  cron  &>/dev/null || systemctl start  crond  &>/dev/null || true
 
     print_info "Installing acme.sh..."
-
-    # Method 1: official installer
-    if curl -fsSL https://get.acme.sh | bash -s -- \
-            --home "$ACME_HOME" --email "acme@localhost" &>/dev/null; then
+    # Simplest confirmed-working method: pipe to sh (installs to /root/.acme.sh)
+    if curl -fsSL https://get.acme.sh | sh 2>&1 | tail -5; then
         [[ -f "$ACME_CMD" ]] && { print_success "acme.sh installed."; return 0; }
     fi
 
-    # Method 2: git clone
+    # Fallback: git clone
     print_info "Trying git clone fallback..."
-    rm -rf /tmp/acme_src
-    if git clone --depth=1 https://github.com/acmesh-official/acme.sh.git /tmp/acme_src &>/dev/null; then
-        bash /tmp/acme_src/acme.sh --install \
-            --home "$ACME_HOME" --email "acme@localhost" &>/dev/null
-        rm -rf /tmp/acme_src
+    local acme_src="/tmp/acme_src_$$"
+    rm -rf "$acme_src"
+    if git clone --depth=1 https://github.com/acmesh-official/acme.sh.git "$acme_src" &>/dev/null; then
+        ( cd "$acme_src" && sh acme.sh --install 2>&1 | tail -3 )
+        rm -rf "$acme_src"
     fi
 
     [[ -f "$ACME_CMD" ]] \
-        && { print_success "acme.sh installed."; return 0; } \
-        || { print_error "acme.sh install failed. Run manually: curl https://get.acme.sh | bash"; return 1; }
+        && { print_success "acme.sh installed via git."; return 0; } \
+        || { print_error "acme.sh install failed."; return 1; }
 }
 
 # ── Domain validation ──────────────────────────────────────────
@@ -117,11 +113,18 @@ ssl_issue() {
     done
 
     local issue_output issue_rc
+    # Ensure account has valid email (domain-based) before issuing
+    "$ACME_CMD" --register-account --email "ssl@${domain}" \
+        --server letsencrypt &>/dev/null \
+        || "$ACME_CMD" --update-account --email "ssl@${domain}" &>/dev/null \
+        || true
+
     issue_output=$( "$ACME_CMD" --issue \
         --standalone \
         --httpport "$http_port" \
         -d "$domain" \
         --server letsencrypt \
+        --email "admin@${domain}" \
         --log "${LOG_DIR}/acme.log" \
         --force 2>&1 )
     issue_rc=$?
@@ -150,6 +153,14 @@ ssl_issue() {
     fi
 
     print_error "Certificate issuance failed."
+    # Detect rate limit and show helpful retry date
+    if echo "$issue_output" | grep -q "rateLimited"; then
+        local retry_after
+        retry_after=$(echo "$issue_output" | grep -oP 'retry after \K[^"]+' | head -1)
+        print_warn "Let's Encrypt rate limit reached (5 certs/week per domain)."
+        [[ -n "$retry_after" ]] && print_warn "Retry after: ${retry_after}"
+        print_info "WS+TLS will use sing-box built-in ACME cert as fallback."
+    fi
     print_info "Full log: ${LOG_DIR}/acme.log"
     echo -e "  ${DIM}Common causes:${NC}"
     echo -e "  ${DIM}• Port 80 blocked in VPS provider firewall panel${NC}"

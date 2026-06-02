@@ -225,6 +225,7 @@ app     = Flask(__name__)
 DB_PATH = "/etc/singbox-manager/data/users.db"
 HY2_INFO_PATH  = "/etc/hysteria/server.json"
 VLESS_INFO_PATH = "/etc/sing-box/server.json"
+VWS_INFO_PATH  = "/etc/sing-box/server_ws.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -383,6 +384,24 @@ def subscription(token):
             sni      = "sni=hysteria" if selfcert else f"sni={hi.get('domain','')}"
             hy2_link = f"hysteria2://{uuid}:{sub_tok}@{h_host}:{h_port}?{sni}{insecure}#{label}"
             links.append(hy2_link)
+
+    # ── VLESS + WebSocket + TLS link ──────────────────────────
+    if engines.get("vless_ws"):
+        wi = load_json_file(VWS_INFO_PATH)
+        if wi:
+            import urllib.parse
+            w_host  = wi.get("domain", "")
+            w_port  = wi.get("port", 443)
+            w_path  = urllib.parse.quote(wi.get("path", "/ws"))
+            uuid    = row["uuid"]
+            label   = urllib.parse.quote(f"{row['label']}-WS")
+            ws_link = (
+                f"vless://{uuid}@{w_host}:{w_port}"
+                f"?encryption=none&security=tls&sni={w_host}&fp=chrome"
+                f"&type=ws&path={w_path}&host={w_host}"
+                f"#{label}"
+            )
+            links.append(ws_link)
 
     if not links:
         return Response("No active configs for this user", status=404)
@@ -559,19 +578,26 @@ hy2_install_sync_cron() {
 
 # hy2_write_config <port> <domain_or_empty> <up_mbps> <down_mbps>
 #                  <init_stream> <max_stream> <init_conn> <max_conn>
-#                  <idle_timeout> <keepalive>
+#                  <idle_timeout> <keepalive> [hop_range e.g. "8000-9000"]
 hy2_write_config() {
     local port="$1" domain="$2" up="$3" down="$4"
     local is="$5" ms="$6" ic="$7" mc="$8"
-    local idle="${9:-60s}" ka="${10:-20s}"
+    local idle="${9:-60s}" ka="${10:-20s}" hop_range="${11:-}"
     local masq_url="https://www.speedtest.net"
+
+    # Build listen line: port hopping if range provided
+    local listen_line=":${port}"
+    if [[ -n "$hop_range" ]]; then
+        listen_line=":${port},${hop_range}"
+        print_info "Port hopping enabled: ${port} + ${hop_range}"
+    fi
 
     mkdir -p /etc/hysteria
 
     if [[ -n "$domain" ]]; then
         # ACME auto-cert
         cat > "$HY2_CONFIG" << YAMLEOF
-listen: :${port}
+listen: ${listen_line}
 
 acme:
   domains:
@@ -615,7 +641,7 @@ YAMLEOF
             || { print_error "openssl not found: apt install openssl"; return 1; }
 
         cat > "$HY2_CONFIG" << YAMLEOF
-listen: :${port}
+listen: ${listen_line}
 
 tls:
   cert: /etc/hysteria/certs/cert.pem
@@ -700,11 +726,91 @@ hy2_install_server() {
 
     local port domain
     ask port   "  UDP listen port"                          "443"
-    ask domain "  Domain for TLS (blank = self-signed)"     ""
 
+    local hop_range=""
+    echo ""
+    echo -e "  ${BOLD}Port hopping${NC} ${DIM}— Hysteria2 rotates through a port range every few seconds.${NC}"
+    echo -e "  ${DIM}Makes it much harder for DPI to block. Requires client support (Hiddify/NekoBox).${NC}"
+    if confirm "Enable port hopping?" "y"; then
+        local hop_start hop_end
+        ask hop_start "  Hop range start" "20000"
+        ask hop_end   "  Hop range end"   "30000"
+        hop_range="${hop_start}-${hop_end}"
+        print_info "Open UDP ${hop_start}-${hop_end} in your VPS provider firewall too."
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}SSL Certificate Options:${NC}"
+    echo -e "  ${CYAN}1.${NC} Use domain with ACME auto-cert (recommended)"
+    echo -e "  ${CYAN}2.${NC} Self-signed certificate (requires client 'insecure=true')"
+    echo -e "  ${CYAN}3.${NC} Use existing Let's Encrypt certificate"
+    echo ""
+    
+    local ssl_choice
+    echo -ne "  ${YELLOW}Choose option [1]: ${NC}"
+    read -r ssl_choice
+    ssl_choice="${ssl_choice:-1}"
+    
+    case "$ssl_choice" in
+        1)
+            # Check for existing SSL configuration
+            ssl_load_domain 2>/dev/null || true
+            local existing_domain="${DOMAIN:-}"
+            
+            if [[ -n "$existing_domain" ]] && confirm "Use existing domain '${existing_domain}'?" "y"; then
+                domain="$existing_domain"
+                print_success "Using domain: ${domain}"
+            else
+                ask domain "  Domain for ACME auto-cert" ""
+                [[ -z "$domain" ]] && { print_warn "No domain specified. Using self-signed."; }
+            fi
+            ;;
+        2)
+            print_info "Using self-signed certificate"
+            domain=""
+            ;;
+        3)
+            # Check for existing SSL certs
+            ssl_load_domain 2>/dev/null || true
+            local existing_domain="${DOMAIN:-}"
+            
+            if [[ -n "$existing_domain" ]]; then
+                echo ""
+                print_info "Found existing domain: ${existing_domain}"
+                if ssl_has_valid_cert "$existing_domain"; then
+                    print_success "Valid SSL certificate found for ${existing_domain}"
+                    domain="$existing_domain"
+                    print_info "Will use existing certificate"
+                else
+                    print_warn "No valid certificate found for ${existing_domain}"
+                    ask domain "  Enter domain with valid certificate" ""
+                fi
+            else
+                print_info "No existing domain configured"
+                ask domain "  Enter domain with existing certificate" ""
+            fi
+            
+            # If domain is provided but cert not found, warn user
+            if [[ -n "$domain" ]] && ! ssl_has_valid_cert "$domain"; then
+                print_warn "No valid certificate found for ${domain}"
+                print_warn "You need to get a certificate first from SSL menu"
+                confirm "Continue with self-signed for now?" "y" || return 1
+                domain=""
+            fi
+            ;;
+        *)
+            print_warn "Invalid choice. Using self-signed."
+            domain=""
+            ;;
+    esac
+    
     if [[ -z "$domain" ]]; then
-        print_warn "No domain — self-signed cert will be used."
-        print_warn "Clients must enable 'Skip TLS verification'."
+        echo ""
+        print_warn "Using self-signed certificate"
+        print_info "Clients must enable 'insecure=true' or 'Skip TLS verification'"
+    else
+        echo ""
+        print_success "Will use domain: ${domain}"
     fi
 
     # Probe server and compute QUIC params
@@ -734,7 +840,7 @@ hy2_install_server() {
     print_step 4 5 "Writing configuration"
     hy2_write_config "$port" "$domain" "$up_mbps" "$down_mbps" \
                      "$init_stream" "$max_stream" "$init_conn" "$max_conn" \
-                     "60s" "20s"
+                     "60s" "20s" "$hop_range"
 
     local server_ip
     server_ip=$(get_public_ip)

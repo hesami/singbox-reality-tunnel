@@ -226,6 +226,7 @@ DB_PATH = "/etc/singbox-manager/data/users.db"
 HY2_INFO_PATH  = "/etc/hysteria/server.json"
 VLESS_INFO_PATH = "/etc/sing-box/server.json"
 VWS_INFO_PATH  = "/etc/sing-box/server_ws.json"
+GRPC_INFO_PATH = "/etc/sing-box/server_grpc.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -402,6 +403,24 @@ def subscription(token):
                 f"#{label}"
             )
             links.append(ws_link)
+
+    # ── VLESS + gRPC + TLS link ────────────────────────────────
+    if engines.get("vless_grpc"):
+        gi = load_json_file(GRPC_INFO_PATH)
+        if gi:
+            import urllib.parse
+            g_host  = gi.get("domain", "")
+            g_port  = gi.get("port", 443)
+            g_service = urllib.parse.quote(gi.get("service_name", "singbox-grpc"))
+            uuid    = row["uuid"]
+            label   = urllib.parse.quote(f"{row['label']}-gRPC")
+            grpc_link = (
+                f"vless://{uuid}@{g_host}:{g_port}"
+                f"?encryption=none&security=tls&sni={g_host}&fp=chrome&alpn=h2"
+                f"&type=grpc&serviceName={g_service}"
+                f"#{label}"
+            )
+            links.append(grpc_link)
 
     if not links:
         return Response("No active configs for this user", status=404)

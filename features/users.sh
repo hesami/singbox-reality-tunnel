@@ -4,6 +4,7 @@
 #
 #  Depends on: core/common.sh  core/db.sh
 #              protocols/vless.sh  protocols/hysteria2.sh
+#              protocols/vless_ws.sh  protocols/grpc.sh
 # ═══════════════════════════════════════════════════════════════
 
 # ── Detect which engines are installed on this server ──────────
@@ -11,12 +12,14 @@
 users_vless_installed()    { [[ -f "$SINGBOX_BIN"  && -f "$SINGBOX_CONFIG"  ]]; }
 users_hy2_installed()      { [[ -f "$HY2_BIN"      && -f "$HY2_CONFIG"      ]]; }
 users_vws_installed()      { [[ -f "/etc/sing-box/server_ws.json" ]]; }
+users_grpc_installed()     { [[ -f "/etc/sing-box/server_grpc.json" ]]; }
 
 users_active_engines() {
     local engines=()
     users_vless_installed && engines+=("vless")
     users_hy2_installed   && engines+=("hysteria2")
     users_vws_installed   && engines+=("vless_ws")
+    users_grpc_installed  && engines+=("vless_grpc")
     echo "${engines[@]}"
 }
 
@@ -58,14 +61,42 @@ users_add() {
     # ── Protocol selection ─────────────────────────────────
     echo ""
     echo -e "  ${BOLD}Enable for which protocols?${NC}"
-    local enable_vless=false enable_hy2=false enable_ws=false
+    local enable_vless=false enable_hy2=false enable_ws=false enable_grpc=false
 
-    if users_vless_installed && users_hy2_installed && users_vws_installed; then
-        echo -e "  ${CYAN}1)${NC}  All protocols  ${DIM}(VLESS + Hysteria2 + WS+TLS)${NC}"
+    # Dynamically build menu based on installed protocols
+    local installed_count=0
+    users_vless_installed && ((installed_count++))
+    users_hy2_installed && ((installed_count++))
+    users_vws_installed && ((installed_count++))
+    users_grpc_installed && ((installed_count++))
+
+    if (( installed_count >= 4 )); then
+        # All four installed
+        echo -e "  ${CYAN}1)${NC}  All protocols  ${DIM}(VLESS + Hysteria2 + WS + gRPC)${NC}"
+        echo -e "  ${CYAN}2)${NC}  VLESS only"
+        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
+        echo -e "  ${CYAN}4)${NC}  WS+TLS only"
+        echo -e "  ${CYAN}5)${NC}  gRPC only"
+        echo -e "  ${CYAN}6)${NC}  VLESS + Hysteria2 (no CDN)"
+        echo -e "  ${CYAN}7)${NC}  WS + gRPC (CDN-friendly)"
+        menu_prompt
+        case "$MENU_CHOICE" in
+            1|"") enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
+            2)    enable_vless=true ;;
+            3)    enable_hy2=true ;;
+            4)    enable_ws=true ;;
+            5)    enable_grpc=true ;;
+            6)    enable_vless=true; enable_hy2=true ;;
+            7)    enable_ws=true; enable_grpc=true ;;
+            *)    enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
+        esac
+    elif users_vless_installed && users_hy2_installed && users_vws_installed; then
+        # Three protocols (VLESS + Hy2 + WS)
+        echo -e "  ${CYAN}1)${NC}  All three  ${DIM}(VLESS + Hysteria2 + WS+TLS)${NC}"
         echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
         echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
         echo -e "  ${CYAN}4)${NC}  WS+TLS only"
-        echo -e "  ${CYAN}5)${NC}  VLESS + Hysteria2  (no WS)"
+        echo -e "  ${CYAN}5)${NC}  VLESS + Hysteria2 (no WS)"
         menu_prompt
         case "$MENU_CHOICE" in
             1|"") enable_vless=true; enable_hy2=true; enable_ws=true ;;
@@ -75,7 +106,24 @@ users_add() {
             5)    enable_vless=true; enable_hy2=true ;;
             *)    enable_vless=true; enable_hy2=true; enable_ws=true ;;
         esac
+    elif users_vless_installed && users_hy2_installed && users_grpc_installed; then
+        # Three protocols (VLESS + Hy2 + gRPC)
+        echo -e "  ${CYAN}1)${NC}  All three  ${DIM}(VLESS + Hysteria2 + gRPC)${NC}"
+        echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
+        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
+        echo -e "  ${CYAN}4)${NC}  gRPC only"
+        echo -e "  ${CYAN}5)${NC}  VLESS + Hysteria2 (no gRPC)"
+        menu_prompt
+        case "$MENU_CHOICE" in
+            1|"") enable_vless=true; enable_hy2=true; enable_grpc=true ;;
+            2)    enable_vless=true ;;
+            3)    enable_hy2=true ;;
+            4)    enable_grpc=true ;;
+            5)    enable_vless=true; enable_hy2=true ;;
+            *)    enable_vless=true; enable_hy2=true; enable_grpc=true ;;
+        esac
     elif users_vless_installed && users_hy2_installed; then
+        # Two protocols (VLESS + Hy2)
         echo -e "  ${CYAN}1)${NC}  Both VLESS + Hysteria2  ${DIM}(recommended)${NC}"
         echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
         echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
@@ -87,8 +135,21 @@ users_add() {
             *)    print_warn "Invalid — using both."; enable_vless=true; enable_hy2=true ;;
         esac
     elif users_vless_installed; then
+        # Only VLESS (or VLESS + WS + gRPC but no Hy2)
         enable_vless=true
-        users_vws_installed && enable_ws=true
+        if users_vws_installed || users_grpc_installed; then
+            echo -e "  ${CYAN}1)${NC}  VLESS with all CDN protocols  ${DIM}(WS + gRPC)${NC}"
+            echo -e "  ${CYAN}2)${NC}  VLESS only"
+            [[ users_vws_installed && users_grpc_installed ]] && echo -e "  ${CYAN}3)${NC}  WS+TLS only" && echo -e "  ${CYAN}4)${NC}  gRPC only"
+            menu_prompt
+            case "$MENU_CHOICE" in
+                1|"") enable_vless=true; users_vws_installed && enable_ws=true; users_grpc_installed && enable_grpc=true ;;
+                2)    enable_vless=true ;;
+                3)    enable_ws=true ;;
+                4)    enable_grpc=true ;;
+                *)    enable_vless=true; users_vws_installed && enable_ws=true; users_grpc_installed && enable_grpc=true ;;
+            esac
+        fi
     elif users_hy2_installed; then
         enable_hy2=true
     fi
@@ -109,7 +170,12 @@ print(exp.isoformat())
     local engines_json
     engines_json=$(python3 -c "
 import json
-e = {'vless': '${enable_vless}' == 'true', 'hysteria2': '${enable_hy2}' == 'true', 'vless_ws': '${enable_ws}' == 'true'}
+e = {
+    'vless': '${enable_vless}' == 'true',
+    'hysteria2': '${enable_hy2}' == 'true',
+    'vless_ws': '${enable_ws}' == 'true',
+    'vless_grpc': '${enable_grpc}' == 'true'
+}
 print(json.dumps(e))
 ")
 

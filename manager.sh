@@ -17,6 +17,7 @@ _src core/db.sh
 _src protocols/vless.sh
 _src protocols/hysteria2.sh
 _src protocols/vless_ws.sh
+_src protocols/grpc.sh
 _src features/ssl.sh
 _src features/users.sh
 _src features/optimization.sh
@@ -30,12 +31,14 @@ check_root
 # ── Status display ─────────────────────────────────────────────
 
 _print_status_bar() {
-    local vless_svc vws_svc hy2_svc auth_svc f2b_svc
+    local vless_svc vws_svc grpc_svc hy2_svc auth_svc f2b_svc
 
     systemctl is-active --quiet sing-box          2>/dev/null \
         && vless_svc="${GREEN}●${NC}" || vless_svc="${DIM}○${NC}"
     systemctl is-active --quiet sing-box-ws       2>/dev/null \
         && vws_svc="${GREEN}●${NC}"   || vws_svc="${DIM}○${NC}"
+    systemctl is-active --quiet sing-box-grpc     2>/dev/null \
+        && grpc_svc="${GREEN}●${NC}"  || grpc_svc="${DIM}○${NC}"
     systemctl is-active --quiet hysteria-server   2>/dev/null \
         && hy2_svc="${GREEN}●${NC}"   || hy2_svc="${DIM}○${NC}"
     systemctl is-active --quiet hysteria-auth     2>/dev/null \
@@ -49,7 +52,7 @@ _print_status_bar() {
     ssl_load_domain 2>/dev/null || true
     local domain_label="${DOMAIN:-(IP only)}"
 
-    echo -e "  ${DIM}Status:${NC} ${vless_svc}VLESS ${vws_svc}WS+TLS ${hy2_svc}HY2 ${auth_svc}API ${f2b_svc}F2B"
+    echo -e "  ${DIM}Status:${NC} ${vless_svc}VLESS ${vws_svc}WS+TLS ${grpc_svc}gRPC ${hy2_svc}HY2 ${auth_svc}API ${f2b_svc}F2B"
     echo -e "  ${DIM}Users: ${CYAN}${user_count}${NC}   Domain: ${CYAN}${domain_label}${NC}"
     echo ""
 }

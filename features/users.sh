@@ -140,7 +140,10 @@ users_add() {
         if users_vws_installed || users_grpc_installed; then
             echo -e "  ${CYAN}1)${NC}  VLESS with all CDN protocols  ${DIM}(WS + gRPC)${NC}"
             echo -e "  ${CYAN}2)${NC}  VLESS only"
-            [[ users_vws_installed && users_grpc_installed ]] && echo -e "  ${CYAN}3)${NC}  WS+TLS only" && echo -e "  ${CYAN}4)${NC}  gRPC only"
+            if users_vws_installed && users_grpc_installed; then
+                echo -e "  ${CYAN}3)${NC}  WS+TLS only"
+                echo -e "  ${CYAN}4)${NC}  gRPC only"
+            fi
             menu_prompt
             case "$MENU_CHOICE" in
                 1|"") enable_vless=true; users_vws_installed && enable_ws=true; users_grpc_installed && enable_grpc=true ;;

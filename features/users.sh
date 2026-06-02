@@ -144,7 +144,8 @@ users_add() {
                 5)    enable_vless=true; enable_hy2=true ;;
                 *)    enable_vless=true; enable_hy2=true; enable_grpc=true ;;
             esac
-        elif users_vless_installed && users_vhy2_installed; then
+        elif users_vless_installed && users_hy2_installed; then
+            # ✅ FIX: was "users_vhy2_installed" (typo) — corrected to "users_hy2_installed"
             # Two protocols (VLESS + Hy2)
             echo -e "  ${CYAN}1)${NC}  Both VLESS + Hysteria2  ${DIM}(recommended)${NC}"
             echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
@@ -676,9 +677,12 @@ users_menu() {
         local count
         count=$(db_user_count 2>/dev/null || echo "0")
 
+        # ✅ FIX: added WS and gRPC to the active protocols display line
         local eng_line=""
         users_vless_installed && eng_line+="VLESS+Reality "
         users_hy2_installed   && eng_line+="Hysteria2 "
+        users_vws_installed   && eng_line+="WS+TLS "
+        users_grpc_installed  && eng_line+="gRPC "
         [[ -z "$eng_line" ]]  && eng_line="${RED}none installed${NC}"
         echo -e "  Active protocols : ${CYAN}${eng_line}${NC}"
         echo -e "  Total users      : ${CYAN}${count}${NC}\n"

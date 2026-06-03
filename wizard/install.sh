@@ -53,12 +53,12 @@ wizard_install() {
     print_banner
     print_header "Step 2 of 4 — Choose protocol(s)"
     echo ""
-    echo -e "  ${CYAN}${BOLD}1)${NC}  ${BOLD}VLESS + Reality${NC}  ${DIM}(TCP — stable, disguised as HTTPS)${NC}"
-    echo -e "  ${CYAN}${BOLD}2)${NC}  ${BOLD}Hysteria2${NC}  ${DIM}(QUIC/UDP — fast on lossy networks)${NC}"
-    echo -e "  ${CYAN}${BOLD}3)${NC}  ${BOLD}VLESS + WebSocket + TLS${NC}  ${DIM}(works through ArvanCloud CDN)${NC}"
-    echo -e "  ${CYAN}${BOLD}4)${NC}  ${BOLD}VLESS + gRPC + TLS${NC}  ${DIM}(HTTP/2 — low latency, high speed)${NC}"
-    echo -e "  ${CYAN}${BOLD}5)${NC}  ${BOLD}All four${NC}  ${DIM}(recommended — client picks best automatically)${NC}"
-    echo -e "  ${CYAN}${BOLD}6)${NC}  ${BOLD}Reality + Hysteria2${NC}  ${DIM}(no CDN needed)${NC}"
+    echo -e "  ${CYAN}1)${NC}  VLESS + Reality      ${DIM}(TCP, stable)${NC}"
+    echo -e "  ${CYAN}2)${NC}  Hysteria2            ${DIM}(QUIC/UDP, fast)${NC}"
+    echo -e "  ${CYAN}3)${NC}  VLESS + WS + TLS     ${DIM}(CDN-compatible)${NC}"
+    echo -e "  ${CYAN}4)${NC}  VLESS + gRPC + TLS   ${DIM}(CDN-compatible, lower latency than WS)${NC}"
+    echo -e "  ${CYAN}5)${NC}  All protocols        ${DIM}(recommended — client picks best)${NC}"
+    echo -e "  ${CYAN}6)${NC}  Reality + Hysteria2  ${DIM}(no CDN needed)${NC}"
     echo ""
     menu_prompt
 
@@ -70,7 +70,7 @@ wizard_install() {
         4) install_grpc=true ;;
         5|"") install_vless=true; install_hy2=true; install_ws=true; install_grpc=true ;;
         6) install_vless=true; install_hy2=true ;;
-        *) print_warn "Invalid — installing Reality + Hysteria2."; install_vless=true; install_hy2=true ;;
+        *) install_vless=true; install_hy2=true ;;
     esac
 
     # ══════════════════════════════════════════════════════════
@@ -299,7 +299,7 @@ wizard_install() {
         fi
     fi
 
-    # ── VLESS+gRPC+TLS ──────────────────────────────────────
+    # ── VLESS+gRPC+TLS ───────────────────────────────────────
     if $install_grpc; then
         echo ""
         echo -e "  ${BOLD}─── VLESS + gRPC + TLS ────────────────────────────${NC}"
@@ -307,27 +307,27 @@ wizard_install() {
         local grpc_domain="${domain:-}"
         [[ -z "$grpc_domain" ]] && ask grpc_domain "  Domain for gRPC+TLS" ""
         if [[ -n "$grpc_domain" ]]; then
-            local grpc_port grpc_service grpc_uuid grpc_token
+            local grpc_port grpc_svc grpc_uuid grpc_token
             ask grpc_port "  gRPC listen port" "443"
-            grpc_service="singbox-grpc"
+            grpc_svc=$(openssl rand -hex 8 2>/dev/null || cat /dev/urandom | tr -dc 'a-z0-9' | head -c 16)
             grpc_uuid=$(generate_uuid)
             grpc_token=$(generate_token)
             ! ssl_cert_exists "$grpc_domain" && ssl_install_acme && ssl_issue "$grpc_domain" || true
-            grpc_write_config "$grpc_port" "$grpc_service" "$grpc_domain" "$grpc_uuid"
-            grpc_save_info "$grpc_port" "$grpc_service" "$grpc_domain" "$grpc_uuid"
-            grpc_create_service
+            vgrpc_write_config "$grpc_port" "$grpc_svc" "$grpc_domain" "$grpc_uuid"
+            vgrpc_save_info "$grpc_port" "$grpc_svc" "$grpc_domain"
+            vgrpc_create_service
             open_port "$grpc_port" tcp
-            service_start "$GRPC_SERVICE" || print_warn "sing-box-grpc failed to start."
-            # Add to DB or add engine to existing user
+            service_start "$VGRPC_SERVICE" || print_warn "sing-box-grpc failed to start."
+            # Register engine on existing user or create standalone
             if $install_vless || $install_hy2; then
                 db_enable_engine "$uuid" "vless_grpc" 2>/dev/null || true
+                vgrpc_config_add_user "$uuid" &>/dev/null || true
             else
                 db_init
                 db_add_user "$grpc_uuid" "default" "0" "$grpc_token" '{"vless_grpc":true}'
             fi
-            print_success "VLESS+gRPC+TLS ready on port ${grpc_port}."
-            # Reload auth API so subscription includes the new gRPC config
             systemctl restart hysteria-auth 2>/dev/null || true
+            print_success "VLESS+gRPC+TLS ready on port ${grpc_port}."
         else
             print_warn "Skipping gRPC+TLS — domain required."
         fi
@@ -391,9 +391,9 @@ PYEOF
     echo -e "  ${BOLD}What's next:${NC}"
     echo -e "  ${DIM}• Use the main menu → User Management to add more users${NC}"
     echo -e "  ${DIM}• Use Security menu to install fail2ban${NC}"
-    $install_hy2 && echo -e "  ${DIM}• ${YELLOW}Remember to allow UDP port in your VPS provider's firewall!${NC}"
-    $install_ws  && echo -e "  ${DIM}• To use with ArvanCloud: enable CDN proxy after confirming direct connection works${NC}"
-    $install_grpc && echo -e "  ${DIM}• gRPC is HTTP/2 based — works great through CDN proxies${NC}"
+    $install_hy2   && echo -e "  ${DIM}• ${YELLOW}Remember to allow UDP port in your VPS provider's firewall!${NC}"
+    $install_ws    && echo -e "  ${DIM}• WS+TLS: enable CDN proxy in ArvanCloud after confirming direct connection${NC}"
+    $install_grpc  && echo -e "  ${DIM}• gRPC: enable HTTP/2 + gRPC support in ArvanCloud CDN settings${NC}"
     echo ""
     press_enter
 }

@@ -4,7 +4,6 @@
 #
 #  Depends on: core/common.sh  core/db.sh
 #              protocols/vless.sh  protocols/hysteria2.sh
-#              protocols/vless_ws.sh  protocols/grpc.sh
 # ═══════════════════════════════════════════════════════════════
 
 # ── Detect which engines are installed on this server ──────────
@@ -12,14 +11,14 @@
 users_vless_installed()    { [[ -f "$SINGBOX_BIN"  && -f "$SINGBOX_CONFIG"  ]]; }
 users_hy2_installed()      { [[ -f "$HY2_BIN"      && -f "$HY2_CONFIG"      ]]; }
 users_vws_installed()      { [[ -f "/etc/sing-box/server_ws.json" ]]; }
-users_grpc_installed()     { [[ -f "/etc/sing-box/server_grpc.json" ]]; }
+users_vgrpc_installed()    { [[ -f "/etc/sing-box/server_grpc.json" ]]; }
 
 users_active_engines() {
     local engines=()
-    users_vless_installed && engines+=("vless")
-    users_hy2_installed   && engines+=("hysteria2")
-    users_vws_installed   && engines+=("vless_ws")
-    users_grpc_installed  && engines+=("vless_grpc")
+    users_vless_installed  && engines+=("vless")
+    users_hy2_installed    && engines+=("hysteria2")
+    users_vws_installed    && engines+=("vless_ws")
+    users_vgrpc_installed  && engines+=("vless_grpc")
     echo "${engines[@]}"
 }
 
@@ -59,126 +58,59 @@ users_add() {
     ask expiry_days "  Validity days     (0 = never)"     "30"
 
     # ── Protocol selection ─────────────────────────────────
+    echo ""
+    echo -e "  ${BOLD}Enable for which protocols?${NC}"
     local enable_vless=false enable_hy2=false enable_ws=false enable_grpc=false
 
-    # Dynamically build menu based on installed protocols
-    local installed_count=0
-    users_vless_installed && ((installed_count++))
-    users_hy2_installed && ((installed_count++))
-    users_vws_installed && ((installed_count++))
-    users_grpc_installed && ((installed_count++))
-
-    if (( installed_count == 1 )); then
-        if users_vless_installed; then
-            enable_vless=true
-            echo ""
-            echo -e "  ${DIM}Only VLESS is installed. Using VLESS only.${NC}"
-        elif users_hy2_installed; then
-            enable_hy2=true
-            echo ""
-            echo -e "  ${DIM}Only Hysteria2 is installed. Using Hysteria2 only.${NC}"
-        elif users_vws_installed; then
-            enable_vless=true
-            enable_ws=true
-            echo ""
-            echo -e "  ${DIM}Only VLESS+WS is installed. Using WS+TLS only.${NC}"
-        elif users_grpc_installed; then
-            enable_vless=true
-            enable_grpc=true
-            echo ""
-            echo -e "  ${DIM}Only VLESS+gRPC is installed. Using gRPC only.${NC}"
-        fi
-    else
-        echo ""
-        echo -e "  ${BOLD}Enable for which protocols?${NC}"
-
-        if (( installed_count >= 4 )); then
-            # All four installed
-            echo -e "  ${CYAN}1)${NC}  All protocols  ${DIM}(VLESS + Hysteria2 + WS + gRPC)${NC}"
-            echo -e "  ${CYAN}2)${NC}  VLESS only"
-            echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
-            echo -e "  ${CYAN}4)${NC}  WS+TLS only"
-            echo -e "  ${CYAN}5)${NC}  gRPC only"
-            echo -e "  ${CYAN}6)${NC}  VLESS + Hysteria2 (no CDN)"
-            echo -e "  ${CYAN}7)${NC}  WS + gRPC (CDN-friendly)"
-            menu_prompt
-            case "$MENU_CHOICE" in
-                1|"") enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
-                2)    enable_vless=true ;;
-                3)    enable_hy2=true ;;
-                4)    enable_ws=true ;;
-                5)    enable_grpc=true ;;
-                6)    enable_vless=true; enable_hy2=true ;;
-                7)    enable_ws=true; enable_grpc=true ;;
-                *)    enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
-            esac
-        elif users_vless_installed && users_hy2_installed && users_vws_installed; then
-            # Three protocols (VLESS + Hy2 + WS)
-            echo -e "  ${CYAN}1)${NC}  All three  ${DIM}(VLESS + Hysteria2 + WS+TLS)${NC}"
-            echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
-            echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
-            echo -e "  ${CYAN}4)${NC}  WS+TLS only"
-            echo -e "  ${CYAN}5)${NC}  VLESS + Hysteria2 (no WS)"
-            menu_prompt
-            case "$MENU_CHOICE" in
-                1|"") enable_vless=true; enable_hy2=true; enable_ws=true ;;
-                2)    enable_vless=true ;;
-                3)    enable_hy2=true ;;
-                4)    enable_ws=true ;;
-                5)    enable_vless=true; enable_hy2=true ;;
-                *)    enable_vless=true; enable_hy2=true; enable_ws=true ;;
-            esac
-        elif users_vless_installed && users_hy2_installed && users_grpc_installed; then
-            # Three protocols (VLESS + Hy2 + gRPC)
-            echo -e "  ${CYAN}1)${NC}  All three  ${DIM}(VLESS + Hysteria2 + gRPC)${NC}"
-            echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
-            echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
-            echo -e "  ${CYAN}4)${NC}  gRPC only"
-            echo -e "  ${CYAN}5)${NC}  VLESS + Hysteria2 (no gRPC)"
-            menu_prompt
-            case "$MENU_CHOICE" in
-                1|"") enable_vless=true; enable_hy2=true; enable_grpc=true ;;
-                2)    enable_vless=true ;;
-                3)    enable_hy2=true ;;
-                4)    enable_grpc=true ;;
-                5)    enable_vless=true; enable_hy2=true ;;
-                *)    enable_vless=true; enable_hy2=true; enable_grpc=true ;;
-            esac
-        elif users_vless_installed && users_hy2_installed; then
-            # ✅ FIX: was "users_vhy2_installed" (typo) — corrected to "users_hy2_installed"
-            # Two protocols (VLESS + Hy2)
-            echo -e "  ${CYAN}1)${NC}  Both VLESS + Hysteria2  ${DIM}(recommended)${NC}"
-            echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
-            echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
-            menu_prompt
-            case "$MENU_CHOICE" in
-                1|"") enable_vless=true; enable_hy2=true ;;
-                2)    enable_vless=true ;;
-                3)    enable_hy2=true ;;
-                *)    print_warn "Invalid — using both."; enable_vless=true; enable_hy2=true ;;
-            esac
-        elif users_vless_installed; then
-            # Only VLESS (or VLESS + WS + gRPC but no Hy2)
-            enable_vless=true
-            if users_vws_installed || users_grpc_installed; then
-                echo -e "  ${CYAN}1)${NC}  VLESS with all CDN protocols  ${DIM}(WS + gRPC)${NC}"
-                echo -e "  ${CYAN}2)${NC}  VLESS only"
-                if users_vws_installed && users_grpc_installed; then
-                    echo -e "  ${CYAN}3)${NC}  WS+TLS only"
-                    echo -e "  ${CYAN}4)${NC}  gRPC only"
-                fi
-                menu_prompt
-                case "$MENU_CHOICE" in
-                    1|"") enable_vless=true; users_vws_installed && enable_ws=true; users_grpc_installed && enable_grpc=true ;;
-                    2)    enable_vless=true ;;
-                    3)    enable_ws=true ;;
-                    4)    enable_grpc=true ;;
-                    *)    enable_vless=true; users_vws_installed && enable_ws=true; users_grpc_installed && enable_grpc=true ;;
-                esac
-            fi
-        elif users_hy2_installed; then
-            enable_hy2=true
-        fi
+    if users_vless_installed && users_hy2_installed && users_vws_installed && users_vgrpc_installed; then
+        echo -e "  ${CYAN}1)${NC}  All protocols"
+        echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
+        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
+        echo -e "  ${CYAN}4)${NC}  WS+TLS only"
+        echo -e "  ${CYAN}5)${NC}  gRPC+TLS only"
+        echo -e "  ${CYAN}6)${NC}  VLESS + Hysteria2 (no CDN)"
+        menu_prompt
+        case "$MENU_CHOICE" in
+            1|"") enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
+            2) enable_vless=true ;;
+            3) enable_hy2=true ;;
+            4) enable_ws=true ;;
+            5) enable_grpc=true ;;
+            6) enable_vless=true; enable_hy2=true ;;
+            *) enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
+        esac
+    elif users_vless_installed && users_hy2_installed && users_vws_installed; then
+        echo -e "  ${CYAN}1)${NC}  All (VLESS + Hysteria2 + WS+TLS)"
+        echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
+        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
+        echo -e "  ${CYAN}4)${NC}  WS+TLS only"
+        echo -e "  ${CYAN}5)${NC}  VLESS + Hysteria2"
+        menu_prompt
+        case "$MENU_CHOICE" in
+            1|"") enable_vless=true; enable_hy2=true; enable_ws=true ;;
+            2) enable_vless=true ;;
+            3) enable_hy2=true ;;
+            4) enable_ws=true ;;
+            5) enable_vless=true; enable_hy2=true ;;
+            *) enable_vless=true; enable_hy2=true; enable_ws=true ;;
+        esac
+    elif users_vless_installed && users_hy2_installed; then
+        echo -e "  ${CYAN}1)${NC}  Both VLESS + Hysteria2  ${DIM}(recommended)${NC}"
+        echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
+        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
+        menu_prompt
+        case "$MENU_CHOICE" in
+            1|"") enable_vless=true; enable_hy2=true ;;
+            2) enable_vless=true ;;
+            3) enable_hy2=true ;;
+            *) enable_vless=true; enable_hy2=true ;;
+        esac
+    elif users_vless_installed; then
+        enable_vless=true
+        users_vws_installed   && enable_ws=true
+        users_vgrpc_installed && enable_grpc=true
+    elif users_hy2_installed; then
+        enable_hy2=true
     fi
 
     # ── Generate identifiers ───────────────────────────────
@@ -197,12 +129,8 @@ print(exp.isoformat())
     local engines_json
     engines_json=$(python3 -c "
 import json
-e = {
-    'vless': '${enable_vless}' == 'true',
-    'hysteria2': '${enable_hy2}' == 'true',
-    'vless_ws': '${enable_ws}' == 'true',
-    'vless_grpc': '${enable_grpc}' == 'true'
-}
+e = {'vless': '${enable_vless}' == 'true', 'hysteria2': '${enable_hy2}' == 'true',
+     'vless_ws': '${enable_ws}' == 'true', 'vless_grpc': '${enable_grpc}' == 'true'}
 print(json.dumps(e))
 ")
 
@@ -255,6 +183,13 @@ print(json.dumps(e))
         local wlink
         wlink=$(vws_build_link "$uuid" "${label}-WS" 2>/dev/null || echo "")
         [[ -n "$wlink" ]] && echo -e "  ${BOLD}WS+TLS link:${NC}\n  ${MAGENTA}${wlink}${NC}\n"
+    fi
+
+    if $enable_grpc && users_vgrpc_installed; then
+        vgrpc_config_add_user "$uuid" &>/dev/null || true
+        local glink
+        glink=$(vgrpc_build_link "$uuid" "${label}-gRPC" 2>/dev/null || echo "")
+        [[ -n "$glink" ]] && echo -e "  ${BOLD}gRPC+TLS link:${NC}\n  ${MAGENTA}${glink}${NC}\n"
     fi
 
     echo -e "  ${BOLD}Subscription URL ${DIM}(all protocols — paste into Hiddify / v2rayN):${NC}"
@@ -479,6 +414,8 @@ users_delete() {
     users_vless_installed && vless_config_remove_user "$uuid" && \
         systemctl is-active --quiet sing-box && \
         systemctl reload-or-restart sing-box 2>/dev/null || true
+    users_vws_installed   && vws_config_remove_user   "$uuid" &>/dev/null && systemctl reload-or-restart sing-box-ws   2>/dev/null || true
+    users_vgrpc_installed && vgrpc_config_remove_user "$uuid" &>/dev/null && systemctl reload-or-restart sing-box-grpc 2>/dev/null || true
 
     db_delete_user "$uuid"
     print_success "User '${label}' deleted."
@@ -598,6 +535,20 @@ print('1' if e.get('vless_ws') else '')
         [[ -n "$wlink" ]] && echo -e "  ${DIM}WS+TLS:   ${MAGENTA}${wlink}${NC}\n"
     fi
 
+    local has_grpc
+    has_grpc=$(USER_JSON="$json" python3 -c "
+import json, os
+d = json.loads(os.environ['USER_JSON'])
+engines_raw = d.get('engines') or '{}'
+e = json.loads(engines_raw) if isinstance(engines_raw, str) else engines_raw
+print('1' if e.get('vless_grpc') else '')
+")
+    if [[ -n "$has_grpc" ]] && users_vgrpc_installed; then
+        local glink
+        glink=$(vgrpc_build_link "$uuid" "${label}-gRPC" 2>/dev/null || echo "")
+        [[ -n "$glink" ]] && echo -e "  ${DIM}gRPC+TLS: ${MAGENTA}${glink}${NC}\n"
+    fi
+
     press_enter
 }
 
@@ -677,12 +628,9 @@ users_menu() {
         local count
         count=$(db_user_count 2>/dev/null || echo "0")
 
-        # ✅ FIX: added WS and gRPC to the active protocols display line
         local eng_line=""
         users_vless_installed && eng_line+="VLESS+Reality "
         users_hy2_installed   && eng_line+="Hysteria2 "
-        users_vws_installed   && eng_line+="WS+TLS "
-        users_grpc_installed  && eng_line+="gRPC "
         [[ -z "$eng_line" ]]  && eng_line="${RED}none installed${NC}"
         echo -e "  Active protocols : ${CYAN}${eng_line}${NC}"
         echo -e "  Total users      : ${CYAN}${count}${NC}\n"

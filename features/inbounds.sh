@@ -91,7 +91,11 @@ inbound_db_list() {
 import sqlite3, json, os
 conn = sqlite3.connect(os.environ["DB_PATH"])
 conn.row_factory = sqlite3.Row
-rows = conn.execute("SELECT * FROM inbounds ORDER BY created_at").fetchall()
+try:
+        rows = conn.execute("SELECT * FROM inbounds ORDER BY created_at").fetchall()
+    except Exception:
+        print("  (No inbounds configured yet. Use 'Add inbound' to get started.)\n")
+        conn.close(); exit(0)
 print(json.dumps([dict(r) for r in rows]))
 conn.close()
 PYEOF
@@ -759,6 +763,8 @@ inbound_delete() {
 # ── Main menu ──────────────────────────────────────────────────
 
 inbounds_menu() {
+    db_init &>/dev/null
+    inbound_db_init &>/dev/null
     while true; do
         print_banner
         print_header "Inbound Management"

@@ -325,114 +325,105 @@ def auth():
 @app.route("/sub/<token>", methods=["GET"])
 def subscription(token):
     """
-    Returns a base64-encoded list of ALL active configs for this user.
-    - If VLESS is enabled for the user  → include VLESS link
-    - If Hysteria2 is enabled           → include Hysteria2 link
-    Clients (Hiddify, v2rayN) parse the list and try each config.
-    Traffic is counted from the shared quota.
+    Reads ALL active inbounds from DB, builds a link for each one
+    using the user's UUID. No engine filtering — every user gets
+    every active protocol automatically.
     """
+    import urllib.parse
+
     row = get_user_by_sub_token(token)
     if not row:
         return Response("Unauthorized", status=401)
-
     if is_expired(row):
         return Response("Subscription expired", status=403)
-
     if is_over_quota(row):
         return Response("Quota exceeded", status=403)
 
-    try:
-        engines = json.loads(row["engines"] or "{}")
-    except Exception:
-        engines = {}
+    uuid      = row["uuid"]
+    sub_tok   = row["sub_token"]
+    base_label = row["label"]
+
+    # Read all active inbounds
+    with get_db() as conn:
+        inbounds = conn.execute(
+            "SELECT tag, protocol, config_json FROM inbounds WHERE enabled=1 ORDER BY created_at"
+        ).fetchall()
 
     links = []
+    for ib in inbounds:
+        proto = ib["protocol"]
+        try:
+            meta = json.loads(ib["config_json"]).get("_meta", {})
+        except Exception:
+            meta = {}
 
-    # ── VLESS + Reality link ───────────────────────────────────
-    if engines.get("vless"):
-        vi = load_json_file(VLESS_INFO_PATH)
-        if vi:
-            host  = vi.get("domain") or vi.get("ip", "")
-            port  = vi.get("port", 443)
-            pub   = vi.get("public_key", "")
-            sid   = vi.get("short_id", "")
-            sni   = vi.get("sni", "")
-            uuid  = row["uuid"]
-            label = f"{row['label']}-VLESS"
-            import urllib.parse
-            enc_label = urllib.parse.quote(label)
-            vless_link = (
-                f"vless://{uuid}@{host}:{port}"
-                f"?encryption=none&flow=xtls-rprx-vision"
-                f"&security=reality&sni={sni}&fp=chrome"
-                f"&pbk={pub}&sid={sid}&type=tcp&headerType=none"
-                f"#{enc_label}"
-            )
-            links.append(vless_link)
+        link = None
+        tag_label = urllib.parse.quote(f"{base_label}-{ib['tag']}")
 
-    # ── Hysteria2 link ─────────────────────────────────────────
-    if engines.get("hysteria2"):
-        hi = load_json_file(HY2_INFO_PATH)
-        if hi:
-            h_host  = hi.get("domain") or hi.get("ip", "")
-            h_port  = hi.get("port", 443)
-            selfcert = hi.get("selfcert", True)
-            uuid     = row["uuid"]
-            sub_tok  = row["sub_token"]
-            label    = f"{row['label']}-HY2"
+        if proto == "vless_reality":
+            host = meta.get("host", "")
+            port = meta.get("port", 443)
+            pub  = meta.get("public_key", "")
+            sni  = meta.get("sni", "")
+            sids = meta.get("short_ids", [])
+            sid  = sids[0] if sids else ""
+            if host and pub:
+                link = (
+                    f"vless://{uuid}@{host}:{port}"
+                    f"?encryption=none&flow=xtls-rprx-vision"
+                    f"&security=reality&sni={sni}&fp=chrome"
+                    f"&pbk={pub}&sid={sid}&type=tcp&headerType=none"
+                    f"#{tag_label}"
+                )
 
-            insecure = "&insecure=1" if selfcert else ""
-            sni      = "sni=hysteria" if selfcert else f"sni={hi.get('domain','')}"
-            hy2_link = f"hysteria2://{uuid}:{sub_tok}@{h_host}:{h_port}?{sni}{insecure}#{label}"
-            links.append(hy2_link)
+        elif proto == "vless_ws":
+            domain = meta.get("domain", "")
+            port   = meta.get("port", 443)
+            path   = urllib.parse.quote(meta.get("path", "/ws"))
+            if domain:
+                link = (
+                    f"vless://{uuid}@{domain}:{port}"
+                    f"?encryption=none&security=tls&sni={domain}&fp=chrome"
+                    f"&type=ws&path={path}&host={domain}"
+                    f"#{tag_label}"
+                )
 
-    # ── VLESS + WebSocket + TLS link ──────────────────────────
-    if engines.get("vless_ws"):
-        wi = load_json_file(VWS_INFO_PATH)
-        if wi:
-            import urllib.parse
-            w_host  = wi.get("domain", "")
-            w_port  = wi.get("port", 443)
-            w_path  = urllib.parse.quote(wi.get("path", "/ws"))
-            uuid    = row["uuid"]
-            label   = urllib.parse.quote(f"{row['label']}-WS")
-            ws_link = (
-                f"vless://{uuid}@{w_host}:{w_port}"
-                f"?encryption=none&security=tls&sni={w_host}&fp=chrome"
-                f"&type=ws&path={w_path}&host={w_host}"
-                f"#{label}"
-            )
-            links.append(ws_link)
+        elif proto == "vless_grpc":
+            domain = meta.get("domain", "")
+            port   = meta.get("port", 443)
+            svc    = urllib.parse.quote(meta.get("service_name", "grpc"))
+            if domain:
+                link = (
+                    f"vless://{uuid}@{domain}:{port}"
+                    f"?encryption=none&security=tls&sni={domain}&fp=chrome"
+                    f"&type=grpc&serviceName={svc}"
+                    f"#{tag_label}"
+                )
 
-    # ── VLESS + gRPC + TLS link ────────────────────────────────
-    if engines.get("vless_grpc"):
-        gi = load_json_file(VGRPC_INFO_PATH)
-        if gi:
-            import urllib.parse
-            g_host = gi.get("domain", "")
-            g_port = gi.get("port", 443)
-            g_svc  = urllib.parse.quote(gi.get("service_name", "grpc"))
-            uuid   = row["uuid"]
-            label  = urllib.parse.quote(f"{row['label']}-gRPC")
-            grpc_link = (
-                f"vless://{uuid}@{g_host}:{g_port}"
-                f"?encryption=none&security=tls&sni={g_host}&fp=chrome"
-                f"&type=grpc&serviceName={g_svc}"
-                f"#{label}"
-            )
-            links.append(grpc_link)
+        elif proto == "hysteria2":
+            host     = meta.get("domain", "") or meta.get("port", "")
+            port     = meta.get("port", 8443)
+            selfcert = meta.get("selfcert", True)
+            if isinstance(selfcert, str):
+                selfcert = selfcert.lower() not in ("false", "0", "")
+            if host or port:
+                # Use IP from DB domain field as fallback
+                h = meta.get("domain", "") or ib["tag"]
+                insecure = "&insecure=1" if selfcert else ""
+                sni_part = "sni=hysteria" if selfcert else f"sni={meta.get('domain','')}"
+                link = f"hysteria2://{uuid}:{sub_tok}@{h}:{port}?{sni_part}{insecure}#{tag_label}"
+
+        if link:
+            links.append(link)
 
     if not links:
-        return Response("No active configs for this user", status=404)
+        return Response("No active inbounds configured on this server", status=404)
 
-    # Build Hiddify/v2rayN compatible subscription body
     body = base64.b64encode("\n".join(links).encode()).decode()
 
-    # Subscription metadata headers
     used_bytes  = int(row["used_bytes"] or 0)
     quota_bytes = int(float(row["quota_gb"] or 0) * 1024**3)
-
-    expire_ts = ""
+    expire_ts   = ""
     if row["expires_at"]:
         try:
             exp = datetime.fromisoformat(row["expires_at"])
@@ -445,16 +436,14 @@ def subscription(token):
     sub_info = f"upload={used_bytes}; download=0; total={quota_bytes}"
     if expire_ts:
         sub_info += f"; expire={expire_ts}"
-
-    label_b64 = base64.b64encode(row["label"].encode()).decode()
+    label_b64 = base64.b64encode(base_label.encode()).decode()
 
     headers = {
-        "Content-Type":              "text/plain; charset=utf-8",
-        "profile-title":             f"base64:{label_b64}",
-        "subscription-userinfo":     sub_info,
-        "profile-update-interval":   "12",
+        "Content-Type":            "text/plain; charset=utf-8",
+        "profile-title":           f"base64:{label_b64}",
+        "subscription-userinfo":   sub_info,
+        "profile-update-interval": "12",
     }
-
     return Response(body, status=200, headers=headers)
 
 # ── Health ─────────────────────────────────────────────────────

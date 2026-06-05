@@ -277,11 +277,6 @@ print(json.dumps(c))
         press_enter; return 1
     }
 
-    # Register first user in users table
-    local sub_token; sub_token=$(generate_token)
-    db_add_user "$uuid" "default" "0" "$sub_token" '{"vless":true}' 2>/dev/null || true
-    db_enable_engine "$uuid" "vless" 2>/dev/null || true
-
     open_port "$port" tcp
     rebuild_singbox_config
 

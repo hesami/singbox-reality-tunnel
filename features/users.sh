@@ -42,78 +42,13 @@ users_sub_url() {
 users_add() {
     print_banner
     print_header "Add New User"
+    echo -e "  ${DIM}The user will automatically receive links for ALL active inbounds.${NC}\n"
 
-    local active_engines
-    read -ra active_engines <<< "$(users_active_engines)"
-
-    if (( ${#active_engines[@]} == 0 )); then
-        print_error "No protocols installed yet. Install VLESS or Hysteria2 first."
-        press_enter; return 1
-    fi
-
-    # ── Basic info ─────────────────────────────────────────
     local label quota_gb expiry_days
     ask label       "  Label"                             "User-$(date +%H%M)"
     ask quota_gb    "  Traffic quota GB  (0 = unlimited)" "50"
     ask expiry_days "  Validity days     (0 = never)"     "30"
 
-    # ── Protocol selection ─────────────────────────────────
-    echo ""
-    echo -e "  ${BOLD}Enable for which protocols?${NC}"
-    local enable_vless=false enable_hy2=false enable_ws=false enable_grpc=false
-
-    if users_vless_installed && users_hy2_installed && users_vws_installed && users_vgrpc_installed; then
-        echo -e "  ${CYAN}1)${NC}  All protocols"
-        echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
-        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
-        echo -e "  ${CYAN}4)${NC}  WS+TLS only"
-        echo -e "  ${CYAN}5)${NC}  gRPC+TLS only"
-        echo -e "  ${CYAN}6)${NC}  VLESS + Hysteria2 (no CDN)"
-        menu_prompt
-        case "$MENU_CHOICE" in
-            1|"") enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
-            2) enable_vless=true ;;
-            3) enable_hy2=true ;;
-            4) enable_ws=true ;;
-            5) enable_grpc=true ;;
-            6) enable_vless=true; enable_hy2=true ;;
-            *) enable_vless=true; enable_hy2=true; enable_ws=true; enable_grpc=true ;;
-        esac
-    elif users_vless_installed && users_hy2_installed && users_vws_installed; then
-        echo -e "  ${CYAN}1)${NC}  All (VLESS + Hysteria2 + WS+TLS)"
-        echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
-        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
-        echo -e "  ${CYAN}4)${NC}  WS+TLS only"
-        echo -e "  ${CYAN}5)${NC}  VLESS + Hysteria2"
-        menu_prompt
-        case "$MENU_CHOICE" in
-            1|"") enable_vless=true; enable_hy2=true; enable_ws=true ;;
-            2) enable_vless=true ;;
-            3) enable_hy2=true ;;
-            4) enable_ws=true ;;
-            5) enable_vless=true; enable_hy2=true ;;
-            *) enable_vless=true; enable_hy2=true; enable_ws=true ;;
-        esac
-    elif users_vless_installed && users_hy2_installed; then
-        echo -e "  ${CYAN}1)${NC}  Both VLESS + Hysteria2  ${DIM}(recommended)${NC}"
-        echo -e "  ${CYAN}2)${NC}  VLESS + Reality only"
-        echo -e "  ${CYAN}3)${NC}  Hysteria2 only"
-        menu_prompt
-        case "$MENU_CHOICE" in
-            1|"") enable_vless=true; enable_hy2=true ;;
-            2) enable_vless=true ;;
-            3) enable_hy2=true ;;
-            *) enable_vless=true; enable_hy2=true ;;
-        esac
-    elif users_vless_installed; then
-        enable_vless=true
-        users_vws_installed   && enable_ws=true
-        users_vgrpc_installed && enable_grpc=true
-    elif users_hy2_installed; then
-        enable_hy2=true
-    fi
-
-    # ── Generate identifiers ───────────────────────────────
     local uuid sub_token expiry_iso=""
     uuid=$(generate_uuid)
     sub_token=$(generate_token)
@@ -126,35 +61,35 @@ print(exp.isoformat())
 " 2>/dev/null)
     fi
 
-    local engines_json
-    engines_json=$(python3 -c "
-import json
-e = {'vless': '${enable_vless}' == 'true', 'hysteria2': '${enable_hy2}' == 'true',
-     'vless_ws': '${enable_ws}' == 'true', 'vless_grpc': '${enable_grpc}' == 'true'}
-print(json.dumps(e))
-")
-
-    # ── Write to central DB ────────────────────────────────
-    if ! db_add_user "$uuid" "$label" "$quota_gb" "$sub_token" \
-                     "$engines_json" "$expiry_iso"; then
+    if ! db_add_user "$uuid" "$label" "$quota_gb" "$sub_token" '{}' "$expiry_iso"; then
         print_error "Failed to add user to database."
         press_enter; return 1
     fi
 
-    # ── Propagate to each protocol ─────────────────────────
-    if $enable_vless && users_vless_installed; then
-        local vless_result
-        vless_result=$(vless_config_add_user "$uuid")
-        [[ "$vless_result" == "OK" ]] \
-            && print_success "Added to VLESS config." \
-            || print_warn "VLESS config update: ${vless_result}"
-        systemctl is-active --quiet sing-box && \
-            systemctl reload-or-restart sing-box 2>/dev/null || true
+    # Add UUID to all sing-box inbounds that exist in config
+    if [[ -f "/etc/sing-box/config.json" ]]; then
+        TARGET_UUID="$uuid" SINGBOX_CONFIG="/etc/sing-box/config.json" python3 - <<'PYEOF2'
+import json, os
+cf = os.environ["SINGBOX_CONFIG"]
+uuid = os.environ["TARGET_UUID"]
+with open(cf) as f: c = json.load(f)
+changed = False
+for ib in c.get("inbounds", []):
+    if ib.get("type") == "vless":
+        users = ib.get("users", [])
+        if not any(u.get("uuid") == uuid for u in users):
+            users.append({"uuid": uuid, "flow": "xtls-rprx-vision"})
+            ib["users"] = users
+            changed = True
+if changed:
+    import tempfile
+    tmp = cf + ".tmp"
+    with open(tmp, "w") as f: json.dump(c, f, indent=2)
+    os.replace(tmp, cf)
+PYEOF2
+        systemctl is-active --quiet sing-box &&             systemctl reload-or-restart sing-box 2>/dev/null || true
     fi
 
-    # Hysteria2 is handled by auth API (reads UUID from central DB) — no config edit needed
-
-    # ── Show results ───────────────────────────────────────
     local sub_url
     sub_url=$(users_sub_url "$sub_token")
 
@@ -166,37 +101,12 @@ print(json.dumps(e))
     echo -e "  Quota   : ${CYAN}$([ "$quota_gb" = "0" ] && echo "Unlimited" || echo "${quota_gb} GB")${NC}"
     [[ -n "$expiry_iso" ]] && echo -e "  Expires : ${CYAN}${expiry_iso:0:10}${NC}"
     echo ""
-
-    if $enable_vless && users_vless_installed; then
-        local vlink
-        vlink=$(vless_build_link "$uuid" "${label}-VLESS" 2>/dev/null || echo "")
-        [[ -n "$vlink" ]] && echo -e "  ${BOLD}VLESS link:${NC}\n  ${MAGENTA}${vlink}${NC}\n"
-    fi
-
-    if $enable_hy2 && users_hy2_installed; then
-        local hlink
-        hlink=$(hy2_build_link "$uuid" "$sub_token" "${label}-HY2" 2>/dev/null || echo "")
-        [[ -n "$hlink" ]] && echo -e "  ${BOLD}Hysteria2 link:${NC}\n  ${MAGENTA}${hlink}${NC}\n"
-    fi
-
-    if $enable_ws && users_vws_installed; then
-        local wlink
-        wlink=$(vws_build_link "$uuid" "${label}-WS" 2>/dev/null || echo "")
-        [[ -n "$wlink" ]] && echo -e "  ${BOLD}WS+TLS link:${NC}\n  ${MAGENTA}${wlink}${NC}\n"
-    fi
-
-    if $enable_grpc && users_vgrpc_installed; then
-        vgrpc_config_add_user "$uuid" &>/dev/null || true
-        local glink
-        glink=$(vgrpc_build_link "$uuid" "${label}-gRPC" 2>/dev/null || echo "")
-        [[ -n "$glink" ]] && echo -e "  ${BOLD}gRPC+TLS link:${NC}\n  ${MAGENTA}${glink}${NC}\n"
-    fi
-
-    echo -e "  ${BOLD}Subscription URL ${DIM}(all protocols — paste into Hiddify / v2rayN):${NC}"
+    echo -e "  ${BOLD}Subscription URL ${DIM}(all active inbounds included):${NC}"
     echo -e "  ${GREEN}${BOLD}${sub_url}${NC}"
-    print_qr "$sub_url" "${label} — Subscription"
+    print_qr "$sub_url" "${label}"
     press_enter
 }
+
 
 # ── List users ─────────────────────────────────────────────────
 

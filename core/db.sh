@@ -16,6 +16,7 @@ DB_DIR="/etc/singbox-manager/data"
 # ── Bootstrap ─────────────────────────────────────────────────
 
 db_init() {
+    inbound_db_init 2>/dev/null || true
     mkdir -p "$DB_DIR"
     python3 - <<'PYEOF'
 import sqlite3, sys, os

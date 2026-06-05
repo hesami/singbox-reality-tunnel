@@ -19,6 +19,7 @@ _src protocols/vless.sh
 _src protocols/hysteria2.sh
 _src protocols/vless_ws.sh
 _src protocols/vless_grpc.sh
+_src features/inbounds.sh
 _src features/ssl.sh
 _src features/users.sh
 _src features/optimization.sh
@@ -72,36 +73,38 @@ main_menu() {
         print_banner
         _print_status_bar
 
-        echo -e "  ${BOLD}── Install ────────────────────────────────────────────${NC}"
-        echo -e "  ${CYAN}1)${NC}  Setup Wizard            ${DIM}New install — proxy or tunnel${NC}"
+        echo -e "  ${BOLD}── Install & Configure ────────────────────────────────${NC}"
+        echo -e "  ${CYAN}1)${NC}  Install Wizard          ${DIM}Install binaries & dependencies${NC}"
+        echo -e "  ${CYAN}2)${NC}  Inbound Management      ${DIM}Add, edit, delete — per-protocol domains${NC}"
         echo ""
         echo -e "  ${BOLD}── Manage ─────────────────────────────────────────────${NC}"
-        echo -e "  ${CYAN}2)${NC}  User Management         ${DIM}Add, edit, quota, subscription${NC}"
-        echo -e "  ${CYAN}3)${NC}  Service Control         ${DIM}Start, stop, logs${NC}"
+        echo -e "  ${CYAN}3)${NC}  User Management         ${DIM}Add, edit, quota, subscription${NC}"
+        echo -e "  ${CYAN}4)${NC}  Service Control         ${DIM}Start, stop, logs${NC}"
         echo ""
         echo -e "  ${BOLD}── Settings ───────────────────────────────────────────${NC}"
-        echo -e "  ${CYAN}4)${NC}  SSL / Domain            ${DIM}Let's Encrypt certificate${NC}"
-        echo -e "  ${CYAN}5)${NC}  Optimization            ${DIM}BBR, TCP tuning, speed test${NC}"
-        echo -e "  ${CYAN}6)${NC}  Security                ${DIM}Fail2ban — block attackers${NC}"
+        echo -e "  ${CYAN}5)${NC}  SSL / Domain            ${DIM}Let's Encrypt certificate${NC}"
+        echo -e "  ${CYAN}6)${NC}  Optimization            ${DIM}BBR, TCP tuning, speed test${NC}"
+        echo -e "  ${CYAN}7)${NC}  Security                ${DIM}Fail2ban — block attackers${NC}"
         echo ""
         echo -e "  ${BOLD}── System ─────────────────────────────────────────────${NC}"
-        echo -e "  ${CYAN}7)${NC}  Update binaries         ${DIM}sing-box, Hysteria2${NC}"
-        echo -e "  ${CYAN}8)${NC}  Uninstall               ${DIM}Remove a protocol or everything${NC}"
-        echo -e "  ${CYAN}9)${NC}  View logs               ${DIM}Live or recent${NC}"
+        echo -e "  ${CYAN}8)${NC}  Update binaries         ${DIM}sing-box, Hysteria2${NC}"
+        echo -e "  ${CYAN}9)${NC}  Uninstall               ${DIM}Remove a protocol or everything${NC}"
+        echo -e "  ${CYAN}10)${NC} View logs               ${DIM}Live or recent${NC}"
         echo ""
         echo -e "  ${DIM}0)  Exit${NC}"
         menu_prompt
 
         case "$MENU_CHOICE" in
             1) wizard_install ;;
-            2) users_menu ;;
-            3) _service_control_menu ;;
-            4) ssl_menu ;;
-            5) opt_menu ;;
-            6) sec_menu ;;
-            7) _update_menu ;;
-            8) _uninstall_menu ;;
-            9) _logs_menu ;;
+            2) inbounds_menu ;;
+            3) users_menu ;;
+            4) _service_control_menu ;;
+            5) ssl_menu ;;
+            6) opt_menu ;;
+            7) sec_menu ;;
+            8) _update_menu ;;
+            9) _uninstall_menu ;;
+            10) _logs_menu ;;
             0) echo ""; exit 0 ;;
             *) print_warn "Invalid choice."; sleep 1 ;;
         esac

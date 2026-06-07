@@ -26,15 +26,13 @@ users_active_engines() {
 
 users_sub_url() {
     local sub_token="$1"
-    local host
     ssl_load_domain 2>/dev/null || true
     if [[ -n "${DOMAIN:-}" ]]; then
-        host="$DOMAIN"
+        # Use HTTPS on standard port if domain available
+        echo "https://${DOMAIN}:${HY2_AUTH_PORT}/sub/${sub_token}"
     else
-        hy2_read_server_info 2>/dev/null && host="${HINFO_IP:-$(get_public_ip)}" \
-            || host="$(get_public_ip)"
+        echo "http://$(get_public_ip):${HY2_AUTH_PORT}/sub/${sub_token}"
     fi
-    echo "http://${host}:${HY2_AUTH_PORT}/sub/${sub_token}"
 }
 
 # ── Add user (interactive — protocol-aware) ────────────────────
@@ -66,25 +64,24 @@ print(exp.isoformat())
         press_enter; return 1
     fi
 
-    # Add UUID to all sing-box inbounds that exist in config
+    # Add UUID to all active vless inbounds and reload
     if [[ -f "/etc/sing-box/config.json" ]]; then
-        TARGET_UUID="$uuid" SINGBOX_CONFIG="/etc/sing-box/config.json" python3 - <<'PYEOF2'
-import json, os
-cf = os.environ["SINGBOX_CONFIG"]
-uuid = os.environ["TARGET_UUID"]
-with open(cf) as f: c = json.load(f)
+        NEWUUID="$uuid" DB_PATH="$DB_PATH" python3 - <<'PYEOF2'
+import sqlite3, json, os, sys
+uuid = os.environ["NEWUUID"]
+cf   = "/etc/sing-box/config.json"
+if not os.path.exists(cf): sys.exit(0)
+with open(cf) as f: config = json.load(f)
 changed = False
-for ib in c.get("inbounds", []):
+for ib in config.get("inbounds", []):
     if ib.get("type") == "vless":
         users = ib.get("users", [])
         if not any(u.get("uuid") == uuid for u in users):
             users.append({"uuid": uuid, "flow": "xtls-rprx-vision"})
-            ib["users"] = users
-            changed = True
+            ib["users"] = users; changed = True
 if changed:
-    import tempfile
     tmp = cf + ".tmp"
-    with open(tmp, "w") as f: json.dump(c, f, indent=2)
+    with open(tmp,"w") as f: json.dump(config,f,indent=2)
     os.replace(tmp, cf)
 PYEOF2
         systemctl is-active --quiet sing-box &&             systemctl reload-or-restart sing-box 2>/dev/null || true
@@ -321,12 +318,23 @@ users_delete() {
     echo -e "\n  ${RED}Delete user '${label}'?${NC}"
     confirm "This cannot be undone." "n" || { press_enter; return; }
 
-    users_vless_installed && vless_config_remove_user "$uuid" && \
+    # Remove UUID from config and rebuild
+    if [[ -f "/etc/sing-box/config.json" ]]; then
+        DELUUID="$uuid" python3 - <<'PYEOF2'
+import json, os
+uuid = os.environ["DELUUID"]
+cf   = "/etc/sing-box/config.json"
+with open(cf) as f: config = json.load(f)
+for ib in config.get("inbounds", []):
+    if ib.get("type") == "vless":
+        ib["users"] = [u for u in ib.get("users",[]) if u.get("uuid") != uuid]
+tmp = cf + ".tmp"
+with open(tmp,"w") as f: json.dump(config,f,indent=2)
+os.replace(tmp, cf)
+PYEOF2
         systemctl is-active --quiet sing-box && \
-        systemctl reload-or-restart sing-box 2>/dev/null || true
-    users_vws_installed   && vws_config_remove_user   "$uuid" &>/dev/null && systemctl reload-or-restart sing-box-ws   2>/dev/null || true
-    users_vgrpc_installed && vgrpc_config_remove_user "$uuid" &>/dev/null && systemctl reload-or-restart sing-box-grpc 2>/dev/null || true
-
+            systemctl reload-or-restart sing-box 2>/dev/null || true
+    fi
     db_delete_user "$uuid"
     print_success "User '${label}' deleted."
     press_enter

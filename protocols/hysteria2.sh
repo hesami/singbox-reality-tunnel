@@ -401,17 +401,18 @@ def subscription(token):
                 )
 
         elif proto == "hysteria2":
-            host     = meta.get("domain", "") or meta.get("port", "")
-            port     = meta.get("port", 8443)
-            selfcert = meta.get("selfcert", True)
+            h_domain  = meta.get("domain", "")
+            h_ip      = meta.get("ip", "")
+            h_port    = int(meta.get("port", 8443))
+            selfcert  = meta.get("selfcert", True)
             if isinstance(selfcert, str):
                 selfcert = selfcert.lower() not in ("false", "0", "")
-            if host or port:
-                # Use IP from DB domain field as fallback
-                h = meta.get("domain", "") or ib["tag"]
+            h = h_domain or h_ip  # prefer domain, fallback IP
+            if h:
                 insecure = "&insecure=1" if selfcert else ""
-                sni_part = "sni=hysteria" if selfcert else f"sni={meta.get('domain','')}"
-                link = f"hysteria2://{uuid}:{sub_tok}@{h}:{port}?{sni_part}{insecure}#{tag_label}"
+                sni_val  = "hysteria" if selfcert else h_domain
+                link = f"hysteria2://{uuid}:{sub_tok}@{h}:{h_port}?sni={sni_val}{insecure}#{tag_label}"
+
 
         if link:
             links.append(link)

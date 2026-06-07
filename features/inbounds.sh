@@ -277,6 +277,7 @@ print(json.dumps(c))
         press_enter; return 1
     }
 
+    [[ -n "$domain" ]] && ssl_save_domain "$domain"
     open_port "$port" tcp
     rebuild_singbox_config
 
@@ -337,6 +338,7 @@ PYEOF
 )
 
     inbound_db_add "$tag" "vless_ws" "$domain" "$port" "$config_json" || { press_enter; return 1; }
+    ssl_save_domain "$domain"
 
     local enc_path; enc_path=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${path}'))")
     local enc_tag;  enc_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${tag}'))")
@@ -399,6 +401,7 @@ PYEOF
 )
 
     inbound_db_add "$tag" "vless_grpc" "$domain" "$port" "$config_json" || { press_enter; return 1; }
+    ssl_save_domain "$domain"
 
     local enc_svc; enc_svc=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${svc}'))")
     local enc_tag; enc_tag=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${tag}'))")
@@ -446,9 +449,10 @@ _inbound_add_hysteria2() {
     [[ -n "$domain" ]] && selfcert="False"
 
     local meta_json
+    local server_ip; server_ip=$(get_public_ip)
     meta_json=$(python3 -c "
 import json
-print(json.dumps({'port':'${port}','domain':'${domain}','selfcert':${selfcert},'hop_range':'${hop_range}'}))
+print(json.dumps({'port':'${port}','domain':'${domain}','ip':'${server_ip}','selfcert':${selfcert},'hop_range':'${hop_range}'}))
 ")
 
     # Store meta for auth_api to build hy2 links

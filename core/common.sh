@@ -17,7 +17,7 @@ DIM='\033[2m'
 NC='\033[0m'
 
 # ── Version & metadata ─────────────────────────────────────────
-MANAGER_VERSION="3.0.10"
+MANAGER_VERSION="3.0.11"
 MANAGER_AUTHOR="Mehdi Hesami"
 
 # ── Global runtime paths (protocols override as needed) ────────

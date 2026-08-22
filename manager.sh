@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  manager.sh — sing-box Proxy Manager  v3.0.10
+#  manager.sh — sing-box Proxy Manager  v3.0.11
 #  Entry point: sources all modules and shows main menu.
 #
 #  Usage:  sudo bash manager.sh

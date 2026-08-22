@@ -73,6 +73,14 @@ conn.close()
 PYEOF
 }
 
+# Return success when a TCP listen port is occupied by another process.
+# Reusing a port already owned by sing-box is allowed for idempotent reruns.
+_tunnel_tcp_port_busy() {
+    local port="$1" line
+    line=$(ss -H -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" {print}' | head -n1)
+    [[ -n "$line" && "$line" != *"sing-box"* ]]
+}
+
 # ══════════════════════════════════════════════════════════════
 #  Foreign server — installs proxy, prints settings for Iran side
 # ══════════════════════════════════════════════════════════════
@@ -85,9 +93,9 @@ _wizard_tunnel_foreign() {
     # Choose protocol
     print_header "Which protocol for the tunnel?"
     echo ""
-    echo -e "  ${CYAN}1)${NC}  ${BOLD}VLESS + Reality${NC}  ${DIM}(TCP — stable, works on most ISPs)${NC}"
-    echo -e "  ${CYAN}2)${NC}  ${BOLD}Hysteria2${NC}  ${DIM}(QUIC/UDP — better for high-loss links)${NC}"
-    echo -e "  ${CYAN}3)${NC}  ${BOLD}Both${NC}  ${DIM}(most resilient — Iran relay picks best)${NC}"
+    echo -e "  ${CYAN}1)${NC}  ${BOLD}VLESS + Reality${NC}  ${DIM}(TCP — recommended for Iran routes)${NC}"
+    echo -e "  ${CYAN}2)${NC}  ${BOLD}Hysteria2${NC}  ${DIM}(QUIC/UDP — may be filtered on some routes)${NC}"
+    echo -e "  ${CYAN}3)${NC}  ${BOLD}Both${NC}  ${DIM}(recommended — automatic health selection)${NC}"
     echo ""
     menu_prompt
 
@@ -116,6 +124,10 @@ _wizard_tunnel_foreign() {
         local def_sid
         def_sid=$(openssl rand -hex 4 2>/dev/null || tr -dc 'a-f0-9' < /dev/urandom | head -c 8)
         ask vport "  VLESS listen port" "443"
+        while _tunnel_tcp_port_busy "$vport"; do
+            print_warn "TCP port ${vport} is already in use by another service. Existing services will not be modified."
+            ask vport "  Choose another VLESS TCP port" "10443"
+        done
         ask vsni  "  Camouflage SNI"    "www.speedtest.net"
         ask vsid  "  Short ID (hex)"    "$def_sid"
 
@@ -149,7 +161,11 @@ _wizard_tunnel_foreign() {
         vless_install_quota_enforcer
         vless_install_traffic_sync
         open_port "$vport" tcp
-        service_start sing-box
+        service_start sing-box || {
+            print_error "Reality server failed to start. Existing services were not modified."
+            journalctl -u sing-box -n 30 --no-pager 2>/dev/null || true
+            press_enter; return 1
+        }
 
         local init_eng
         $proto_hy2 \
@@ -228,8 +244,16 @@ PYEOF
         hy2_install_sync_cron
         open_port "$hport" both
         open_port "$HY2_AUTH_PORT" tcp
-        service_start hysteria-server
-        service_start hysteria-auth
+        service_start hysteria-server || {
+            print_error "Hysteria2 server failed to start."
+            journalctl -u hysteria-server -n 30 --no-pager 2>/dev/null || true
+            press_enter; return 1
+        }
+        service_start hysteria-auth || {
+            print_error "Hysteria2 auth service failed to start."
+            journalctl -u hysteria-auth -n 30 --no-pager 2>/dev/null || true
+            press_enter; return 1
+        }
 
         # If no VLESS, create credentials for Hysteria2 only.
         # In Both mode the VLESS credential above is shared by Hysteria2.
@@ -394,6 +418,13 @@ _wizard_tunnel_iran() {
       \"password\": \"${h_uuid}:${h_token}\",
       \"tls\": {\"enabled\": true, \"insecure\": true}
     },
+    {
+      \"type\": \"urltest\", \"tag\": \"auto-out\",
+      \"outbounds\": [\"vless-out\", \"hy2-out\"],
+      \"url\": \"https://www.gstatic.com/generate_204\",
+      \"interval\": \"1m\", \"tolerance\": 100,
+      \"idle_timeout\": \"10m\", \"interrupt_exist_connections\": true
+    },
     {\"type\": \"direct\", \"tag\": \"direct\"}
   ]"
 
@@ -439,7 +470,13 @@ _wizard_tunnel_iran() {
 
     # ── Determine final tag for routing ──────────────────────
     local final_tag
-    $relay_vless && final_tag="vless-out" || final_tag="hy2-out"
+    if $relay_vless && $relay_hy2; then
+        final_tag="auto-out"
+    elif $relay_vless; then
+        final_tag="vless-out"
+    else
+        final_tag="hy2-out"
+    fi
 
     # ── Install binary and write client config ───────────────
     print_step 1 2 "Installing sing-box binary"
@@ -456,29 +493,56 @@ _wizard_tunnel_iran() {
   \"route\": {\"final\": \"${final_tag}\"}
 }"
 
+    # Validate the generated configuration before touching the service.
+    if ! /usr/local/bin/sing-box check -c /etc/sing-box/config.json >/tmp/singbox-tunnel-check.log 2>&1; then
+        print_error "Generated tunnel configuration is invalid."
+        cat /tmp/singbox-tunnel-check.log
+        press_enter
+        return 1
+    fi
+
     vless_create_service client
-    service_start sing-box-client || { press_enter; return; }
+    service_start sing-box-client || { press_enter; return 1; }
 
     # ── Test connectivity ────────────────────────────────────
-    print_info "Testing tunnel (20s timeout)..."
+    print_info "Testing tunnel (25s timeout)..."
     sleep 3
     local exit_ip
-    exit_ip=$(curl -sf --connect-timeout 20 \
-              --socks5 "127.0.0.1:${socks_port}" https://ifconfig.me 2>/dev/null | tr -d '[:space:]')
-    [[ "$exit_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$exit_ip" =~ ^[0-9a-fA-F:]+:[0-9a-fA-F:]*$ ]] || exit_ip=""
+    exit_ip=$(curl -fsS --max-time 25 --connect-timeout 12 \
+              --socks5-hostname "127.0.0.1:${socks_port}" \
+              https://ifconfig.me 2>/tmp/singbox-tunnel-curl.err | tr -d '[:space:]' || true)
+    [[ "$exit_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$exit_ip" =~ ^[0-9a-fA-F:]+$ ]] || exit_ip=""
 
     echo ""
     if [[ -n "$exit_ip" ]]; then
         print_success "Tunnel is working! Exit IP: ${exit_ip}"
+        if $relay_vless && $relay_hy2; then
+            print_success "Automatic path selection is enabled (Reality + Hysteria2)."
+        fi
     else
-        print_warn "Connection test failed. Check logs with:"
-        echo -e "  ${DIM}journalctl -u sing-box-client -n 50${NC}"
+        print_error "Tunnel connectivity test FAILED. Configuration will NOT be reported as ready."
+        echo -e "  ${DIM}curl error:${NC}"
+        sed 's/^/    /' /tmp/singbox-tunnel-curl.err 2>/dev/null || true
+        echo -e "  ${DIM}Recent sing-box-client log:${NC}"
+        journalctl -u sing-box-client -n 20 --no-pager 2>/dev/null | sed 's/^/    /' || true
+        echo ""
+        if $relay_hy2 && ! $relay_vless; then
+            print_warn "Hysteria2/QUIC is not usable on this route. Re-run Tunnel Step 2 with VLESS + Reality or Both."
+        elif $relay_vless && $relay_hy2; then
+            print_warn "Neither configured path produced working egress. Verify the Reality credentials/port first."
+        else
+            print_warn "Reality connection failed. Verify IP, port, UUID, PublicKey, ShortID and SNI."
+        fi
+        echo ""
+        press_enter
+        return 1
     fi
 
     echo ""
-    echo -e "  ${GREEN}${BOLD}Iran relay configured.${NC}"
+    echo -e "  ${GREEN}${BOLD}Iran relay configured and verified.${NC}"
     echo -e "  Local SOCKS5 : ${CYAN}127.0.0.1:${socks_port}${NC}"
     echo -e "  Foreign IP   : ${CYAN}${foreign_ip}${NC}"
+    echo -e "  Active route : ${CYAN}${final_tag}${NC}"
     echo ""
     echo -e "  ${DIM}Point your clients to the IRAN server.${NC}"
     echo -e "  ${DIM}Go to the FOREIGN server's manager to add/manage users.${NC}"

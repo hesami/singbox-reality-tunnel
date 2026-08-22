@@ -136,8 +136,9 @@ inbounds = []
 for row in rows:
     try:
         ib = json.loads(row["config_json"])
-        ib.pop("_meta", None)   # strip — sing-box rejects unknown fields
-        inbounds.append(ib)
+        # keep metadata in generated config for subscription recovery
+        inbounds.append(ib.copy())
+        ib.pop("_meta", None)
     except Exception as e:
         print(f"WARN: skipping inbound {row['tag']}: {e}")
 

@@ -371,6 +371,22 @@ def subscription(token):
             "SELECT tag, protocol, config_json FROM inbounds WHERE enabled=1 ORDER BY created_at"
         ).fetchall()
 
+    # Recovery: if database table exists but manager created a config file,
+    # rebuild inbound records from sing-box config metadata.
+    if not inbounds:
+        try:
+            cfg_path = "/etc/sing-box/config.json"
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            recovered = []
+            for item in cfg.get("inbounds", []):
+                meta = item.get("_meta", {})
+                if meta:
+                    recovered.append({"tag": item.get("tag","recovered"), "protocol": meta.get("protocol",""), "config_json": json.dumps(item)})
+            inbounds = recovered
+        except Exception:
+            pass
+
     links = []
     for ib in inbounds:
         proto = ib["protocol"]

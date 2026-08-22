@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  manager.sh — sing-box Proxy Manager  v3.0.12
+#  manager.sh — sing-box Proxy Manager  v3.0.13
 #  Entry point: sources all modules and shows main menu.
 #
 #  Usage:  sudo bash manager.sh
@@ -21,6 +21,7 @@ _src core/system.sh
 _src core/db.sh
 _src protocols/vless.sh
 _src protocols/xray.sh
+_src protocols/reverse_ssh.sh
 _src protocols/hysteria2.sh
 _src protocols/vless_ws.sh
 _src protocols/vless_grpc.sh
@@ -179,7 +180,7 @@ _service_control_menu() {
         menu_prompt
         case "$MENU_CHOICE" in
             1)
-                for svc in sing-box sing-box-ws sing-box-grpc hysteria-server hysteria-auth sing-box-client; do
+                for svc in sing-box sing-box-ws sing-box-grpc hysteria-server hysteria-auth sing-box-client reverse-ssh-tunnel; do
                     systemctl is-active --quiet "$svc" 2>/dev/null && {
                         systemctl restart "$svc" && print_success "Restarted: ${svc}"
                     } || true
@@ -269,7 +270,7 @@ _self_update() {
     local failed=0
     for file in \
         core/common.sh core/system.sh core/db.sh \
-        protocols/vless.sh protocols/hysteria2.sh protocols/vless_ws.sh \
+        protocols/vless.sh protocols/xray.sh protocols/reverse_ssh.sh protocols/hysteria2.sh protocols/vless_ws.sh \
         features/ssl.sh features/users.sh \
         features/optimization.sh features/security.sh \
         wizard/install.sh wizard/tunnel.sh \
@@ -299,7 +300,7 @@ _self_update() {
     # Copy new files
     for file in \
         core/common.sh core/system.sh core/db.sh \
-        protocols/vless.sh protocols/hysteria2.sh protocols/vless_ws.sh \
+        protocols/vless.sh protocols/xray.sh protocols/reverse_ssh.sh protocols/hysteria2.sh protocols/vless_ws.sh \
         features/ssl.sh features/users.sh \
         features/optimization.sh features/security.sh \
         wizard/install.sh wizard/tunnel.sh \
@@ -359,7 +360,7 @@ _uninstall_all() {
     confirm "FULL RESET — are you absolutely sure?" "n" || return
 
     print_info "Stopping all services..."
-    for svc in sing-box sing-box-ws sing-box-grpc sing-box-client hysteria-server hysteria-auth fail2ban; do
+    for svc in sing-box sing-box-ws sing-box-grpc sing-box-client hysteria-server hysteria-auth xray-tunnel-server xray-tunnel-client reverse-ssh-tunnel fail2ban; do
         systemctl stop    "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
     done
@@ -368,10 +369,10 @@ _uninstall_all() {
     rm -f /etc/systemd/system/sing-box.service
     rm -f /etc/systemd/system/sing-box-ws.service
     rm -f /etc/systemd/system/sing-box-grpc.service
-    rm -f /etc/systemd/system/sing-box-client.service
+    rm -f /etc/systemd/system/sing-box-client.service /etc/systemd/system/reverse-ssh-tunnel.service
     rm -f /etc/systemd/system/hysteria-server.service
     rm -f /etc/systemd/system/hysteria-auth.service
-    for svc in sing-box sing-box-client hysteria-server hysteria-auth; do
+    for svc in sing-box sing-box-client hysteria-server hysteria-auth reverse-ssh-tunnel; do
         rm -rf "/etc/systemd/system/${svc}.service.d"
     done
     systemctl daemon-reload

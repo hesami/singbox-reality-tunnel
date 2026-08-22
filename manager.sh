@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  manager.sh — sing-box Proxy Manager  v3.0.13
+#  manager.sh — sing-box Proxy Manager  v3.0.14
 #  Entry point: sources all modules and shows main menu.
 #
 #  Usage:  sudo bash manager.sh
@@ -22,6 +22,7 @@ _src core/db.sh
 _src protocols/vless.sh
 _src protocols/xray.sh
 _src protocols/reverse_ssh.sh
+_src protocols/customer_gateway.sh
 _src protocols/hysteria2.sh
 _src protocols/vless_ws.sh
 _src protocols/vless_grpc.sh
@@ -117,6 +118,7 @@ main_menu() {
         echo -e "  ${CYAN}1)${NC}  Install Wizard          ${DIM}Install binaries & dependencies${NC}"
         echo -e "  ${CYAN}2)${NC}  Inbound Management      ${DIM}Add, edit, delete — per-protocol domains${NC}"
         echo -e "  ${CYAN}11)${NC} Tunnel Setup            ${DIM}Iran ↔ Foreign server relay${NC}"
+        echo -e "  ${CYAN}12)${NC} Customer Gateway        ${DIM}v2rayN users → Iran → Turkey exit${NC}"
         echo ""
         echo -e "  ${BOLD}── Manage ─────────────────────────────────────────────${NC}"
         echo -e "  ${CYAN}3)${NC}  User Management         ${DIM}Add, edit, quota, subscription${NC}"
@@ -147,6 +149,7 @@ main_menu() {
             9) _uninstall_menu ;;
             10) _logs_menu ;;
             11) wizard_tunnel ;;
+            12) cgw_menu ;;
             0) echo ""; exit 0 ;;
             *) print_warn "Invalid choice."; sleep 1 ;;
         esac

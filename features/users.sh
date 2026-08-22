@@ -12,6 +12,7 @@ users_vless_installed()    { [[ -f "$SINGBOX_BIN"  && -f "$SINGBOX_CONFIG"  ]]; 
 users_hy2_installed()      { [[ -f "$HY2_BIN"      && -f "$HY2_CONFIG"      ]]; }
 users_vws_installed()      { [[ -f "/etc/sing-box/server_ws.json" ]]; }
 users_vgrpc_installed()    { [[ -f "/etc/sing-box/server_grpc.json" ]]; }
+users_gateway_installed()  { [[ -s "/etc/customer-gateway/gateway.json" && -f "/etc/systemd/system/customer-gateway.service" ]]; }
 
 users_active_engines() {
     local engines=()
@@ -19,6 +20,7 @@ users_active_engines() {
     users_hy2_installed    && engines+=("hysteria2")
     users_vws_installed    && engines+=("vless_ws")
     users_vgrpc_installed  && engines+=("vless_grpc")
+    users_gateway_installed && engines+=("gateway")
     echo "${engines[@]}"
 }
 
@@ -26,11 +28,18 @@ users_active_engines() {
 
 users_sub_url() {
     local sub_token="$1"
+    if users_gateway_installed; then
+        local host port
+        host=$(cgw_state_get host 2>/dev/null || true)
+        port=$(cgw_state_get sub_port 2>/dev/null || true)
+        if [[ -n "$host" && -n "$port" ]]; then
+            echo "http://${host}:${port}/sub/${sub_token}"
+            return
+        fi
+    fi
     ssl_load_domain 2>/dev/null || true
     local host="${DOMAIN:-}"
     [[ -n "$host" ]] || host=$(get_public_ip 2>/dev/null || echo "127.0.0.1")
-    # hysteria-auth serves plain HTTP on its dedicated port. Do not advertise
-    # HTTPS here unless a separate TLS listener is explicitly implemented.
     echo "http://${host}:${HY2_AUTH_PORT}/sub/${sub_token}"
 }
 
@@ -62,6 +71,8 @@ print(exp.isoformat())
         print_error "Failed to add user to database."
         press_enter; return 1
     fi
+
+    users_gateway_installed && cgw_enable_user "$uuid"
 
     # Keep DB-backed VLESS configs and runtime config synchronized.
     if declare -F rebuild_singbox_config >/dev/null 2>&1; then
@@ -254,6 +265,7 @@ users_edit() {
     [[ -n "$new_label" ]] && db_update_field "$uuid" "label"    "$new_label"
     [[ -n "$new_quota" ]] && db_update_field "$uuid" "quota_gb" "$new_quota"
     [[ -n "$new_note"  ]] && db_update_field "$uuid" "note"     "$new_note"
+    cgw_rebuild_if_installed
 
     print_success "User updated."
     press_enter
@@ -306,6 +318,7 @@ PYEOF
         systemctl is-active --quiet sing-box && \
             systemctl reload-or-restart sing-box 2>/dev/null || true
     fi
+    cgw_rebuild_if_installed
     press_enter
 }
 
@@ -340,6 +353,7 @@ PYEOF2
             systemctl reload-or-restart sing-box 2>/dev/null || true
     fi
     db_delete_user "$uuid"
+    cgw_rebuild_if_installed
     print_success "User '${label}' deleted."
     press_enter
 }
@@ -385,6 +399,7 @@ PYEOF
             systemctl reload-or-restart sing-box 2>/dev/null || true
     fi
 
+    cgw_rebuild_if_installed
     print_success "Traffic reset for '${label}'."
     press_enter
 }
@@ -471,6 +486,12 @@ print('1' if e.get('vless_grpc') else '')
         [[ -n "$glink" ]] && echo -e "  ${DIM}gRPC+TLS: ${MAGENTA}${glink}${NC}\n"
     fi
 
+    if users_gateway_installed; then
+        local gwlink
+        gwlink=$(cgw_build_link "$uuid" "${label}-Turkey" 2>/dev/null || echo "")
+        [[ -n "$gwlink" ]] && echo -e "  ${DIM}Gateway:   ${MAGENTA}${gwlink}${NC}\n"
+    fi
+
     press_enter
 }
 
@@ -537,6 +558,7 @@ PYEOF
             systemctl reload-or-restart sing-box 2>/dev/null || true
     fi
 
+    cgw_rebuild_if_installed
     print_success "${count} user(s) disabled."
 }
 
@@ -553,6 +575,7 @@ users_menu() {
         local eng_line=""
         users_vless_installed && eng_line+="VLESS+Reality "
         users_hy2_installed   && eng_line+="Hysteria2 "
+        users_gateway_installed && eng_line+="Gateway→Turkey "
         [[ -z "$eng_line" ]]  && eng_line="${RED}none installed${NC}"
         echo -e "  Active protocols : ${CYAN}${eng_line}${NC}"
         echo -e "  Total users      : ${CYAN}${count}${NC}\n"

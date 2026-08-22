@@ -1,3 +1,8 @@
+
+## v3.0.14 — Customer Gateway
+
+Adds a customer-facing VLESS+Reality gateway on the Iran server. Client traffic is forwarded through the local reverse-SSH SOCKS tunnel and exits from the foreign/Turkey server. Includes per-user quota/expiry enforcement, Xray traffic accounting, and v2rayN-compatible subscription URLs. The feature does not modify nginx or ports 80/443.
+
 # 🔒 sing-box Setup & Manager
 
 **اسکریپت Bash تعاملی برای استقرار و مدیریت تونل‌های VLESS + REALITY و Hysteria2 با استفاده از [sing-box](https://github.com/SagerNet/sing-box)**

@@ -645,14 +645,31 @@ hy2_write_config() {
     mkdir -p /etc/hysteria
 
     if [[ -n "$domain" ]]; then
-        # ACME auto-cert
+        # Use existing nginx/certbot certificate if available.
+        # Never use HTTP-01 ACME here because port 80 is commonly occupied by nginx.
+        TLS_CERT="/etc/letsencrypt/live/${domain}/fullchain.pem"
+        TLS_KEY="/etc/letsencrypt/live/${domain}/privkey.pem"
+
+        if [[ ! -f "$TLS_CERT" || ! -f "$TLS_KEY" ]]; then
+            print_info "No existing certificate found for ${domain}; generating self-signed certificate."
+            mkdir -p /etc/hysteria/certs
+            if [[ ! -f /etc/hysteria/certs/server.crt || ! -f /etc/hysteria/certs/server.key ]]; then
+                openssl req -x509 -nodes -newkey rsa:2048 \
+                    -keyout /etc/hysteria/certs/server.key \
+                    -out /etc/hysteria/certs/server.crt \
+                    -days 3650 \
+                    -subj "/CN=${domain}" >/dev/null 2>&1
+            fi
+            TLS_CERT="/etc/hysteria/certs/server.crt"
+            TLS_KEY="/etc/hysteria/certs/server.key"
+        fi
+
         cat > "$HY2_CONFIG" << YAMLEOF
 listen: ${listen_line}
 
-acme:
-  domains:
-    - ${domain}
-  email: admin@${domain}
+tls:
+  cert: ${TLS_CERT}
+  key: ${TLS_KEY}
 
 auth:
   type: http

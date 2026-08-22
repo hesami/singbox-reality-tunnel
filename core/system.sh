@@ -99,8 +99,13 @@ probe_server() {
     SRV_HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "unknown")
 
     # Location via IP geo (lightweight, no API key required)
-    SRV_LOCATION=$(curl -s --connect-timeout 5 "https://ipapi.co/${SRV_PUBLIC_IP}/country/" 2>/dev/null \
-                   | tr -d '[:space:]' | head -c 5 || echo "XX")
+    if [[ "$SRV_PUBLIC_IP" != "unknown" ]]; then
+        SRV_LOCATION=$(curl -sf --connect-timeout 5 "https://ipapi.co/${SRV_PUBLIC_IP}/country/" 2>/dev/null \
+                       | tr -d '[:space:]' | head -c 5)
+        [[ "$SRV_LOCATION" =~ ^[A-Za-z]{2}$ ]] || SRV_LOCATION="XX"
+    else
+        SRV_LOCATION="XX"
+    fi
 
     log_info "Server profile: RAM=${SRV_RAM_MB}MB profile=${SRV_RAM_PROFILE} cores=${SRV_CPU_CORES} virt=${SRV_VIRT} kernel=${SRV_KERNEL} BBR=${SRV_BBR_VERSION} ip=${SRV_PUBLIC_IP} loc=${SRV_LOCATION}"
 }
@@ -171,12 +176,26 @@ show_server_profile() {
 
 get_public_ip() {
     local ip
-    ip=$(curl -4 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null) \
-    || ip=$(curl -4 -s --connect-timeout 5 https://api.ipify.org 2>/dev/null) \
-    || ip=$(curl -4 -s --connect-timeout 5 https://ipv4.icanhazip.com 2>/dev/null) \
-    || ip=$(curl -6 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null) \
-    || ip="unknown"
-    echo "$ip"
+    for cmd in \
+        "curl -4 -sf --connect-timeout 5 https://ifconfig.me" \
+        "curl -4 -sf --connect-timeout 5 https://api.ipify.org" \
+        "curl -4 -sf --connect-timeout 5 https://ipv4.icanhazip.com" \
+        "curl -4 -sf --connect-timeout 5 https://ifconfig.co" \
+        "curl -6 -sf --connect-timeout 5 https://ifconfig.me" \
+        "curl -6 -sf --connect-timeout 5 https://ipv6.icanhazip.com"
+    do
+        ip=$($cmd 2>/dev/null | tr -d '[:space:]')
+        # Only accept output that actually looks like an IPv4 or IPv6
+        # address. `-f` alone isn't enough: some networks/CDNs return
+        # HTTP 200 with an HTML block/error page (WAF, captive portal,
+        # geo-block, etc.), which curl treats as success.
+        if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$ip" =~ ^[0-9a-fA-F:]+:[0-9a-fA-F:]*$ ]]; then
+            echo "$ip"
+            return 0
+        fi
+    done
+    echo "unknown"
+    return 1
 }
 
 # Measure RTT to a target (Iran-side test point for Iran-hosted servers)

@@ -76,6 +76,7 @@ main_menu() {
         echo -e "  ${BOLD}── Install & Configure ────────────────────────────────${NC}"
         echo -e "  ${CYAN}1)${NC}  Install Wizard          ${DIM}Install binaries & dependencies${NC}"
         echo -e "  ${CYAN}2)${NC}  Inbound Management      ${DIM}Add, edit, delete — per-protocol domains${NC}"
+        echo -e "  ${CYAN}11)${NC} Tunnel Setup            ${DIM}Iran ↔ Foreign server relay${NC}"
         echo ""
         echo -e "  ${BOLD}── Manage ─────────────────────────────────────────────${NC}"
         echo -e "  ${CYAN}3)${NC}  User Management         ${DIM}Add, edit, quota, subscription${NC}"
@@ -105,6 +106,7 @@ main_menu() {
             8) _update_menu ;;
             9) _uninstall_menu ;;
             10) _logs_menu ;;
+            11) wizard_tunnel ;;
             0) echo ""; exit 0 ;;
             *) print_warn "Invalid choice."; sleep 1 ;;
         esac

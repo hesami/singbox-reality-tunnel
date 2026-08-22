@@ -358,8 +358,9 @@ _wizard_tunnel_iran() {
     print_info "Testing tunnel (20s timeout)..."
     sleep 3
     local exit_ip
-    exit_ip=$(curl -s --connect-timeout 20 \
-              --socks5 "127.0.0.1:${socks_port}" https://ifconfig.me 2>/dev/null || echo "")
+    exit_ip=$(curl -sf --connect-timeout 20 \
+              --socks5 "127.0.0.1:${socks_port}" https://ifconfig.me 2>/dev/null | tr -d '[:space:]')
+    [[ "$exit_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$exit_ip" =~ ^[0-9a-fA-F:]+:[0-9a-fA-F:]*$ ]] || exit_ip=""
 
     echo ""
     if [[ -n "$exit_ip" ]]; then

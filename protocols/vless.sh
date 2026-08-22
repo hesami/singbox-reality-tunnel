@@ -551,8 +551,9 @@ vless_install_client() {
     print_info "Testing tunnel connectivity..."
     sleep 2
     local test_ip
-    test_ip=$(curl -s --connect-timeout 10 --socks5 "127.0.0.1:${socks_port}" \
-              https://ifconfig.me 2>/dev/null || echo "")
+    test_ip=$(curl -sf --connect-timeout 10 --socks5 "127.0.0.1:${socks_port}" \
+              https://ifconfig.me 2>/dev/null | tr -d '[:space:]')
+    [[ "$test_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$test_ip" =~ ^[0-9a-fA-F:]+:[0-9a-fA-F:]*$ ]] || test_ip=""
     echo ""
     if [[ -n "$test_ip" ]]; then
         print_success "Tunnel working! Outbound IP: ${test_ip}"

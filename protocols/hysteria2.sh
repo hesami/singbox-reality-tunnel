@@ -267,9 +267,16 @@ def get_db():
     return conn
 
 def get_user_by_sub_token(token):
+    token = (token or "").strip()
     with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE trim(sub_token)=? AND enabled=1", (token,)
+        ).fetchone()
+        if row:
+            return row
+        # compatibility fallback for older installations
         return conn.execute(
-            "SELECT * FROM users WHERE sub_token=? AND enabled=1", (token,)
+            "SELECT * FROM users WHERE trim(sub_token)=?", (token,)
         ).fetchone()
 
 def get_user_by_uuid_pass(uuid, password):
@@ -645,31 +652,23 @@ hy2_write_config() {
     mkdir -p /etc/hysteria
 
     if [[ -n "$domain" ]]; then
-        # Use existing nginx/certbot certificate if available.
-        # Never use HTTP-01 ACME here because port 80 is commonly occupied by nginx.
-        TLS_CERT="/etc/letsencrypt/live/${domain}/fullchain.pem"
-        TLS_KEY="/etc/letsencrypt/live/${domain}/privkey.pem"
-
-        if [[ ! -f "$TLS_CERT" || ! -f "$TLS_KEY" ]]; then
-            print_info "No existing certificate found for ${domain}; generating self-signed certificate."
-            mkdir -p /etc/hysteria/certs
-            if [[ ! -f /etc/hysteria/certs/server.crt || ! -f /etc/hysteria/certs/server.key ]]; then
-                openssl req -x509 -nodes -newkey rsa:2048 \
-                    -keyout /etc/hysteria/certs/server.key \
-                    -out /etc/hysteria/certs/server.crt \
-                    -days 3650 \
-                    -subj "/CN=${domain}" >/dev/null 2>&1
-            fi
-            TLS_CERT="/etc/hysteria/certs/server.crt"
-            TLS_KEY="/etc/hysteria/certs/server.key"
+        # External certificate mode. Never use Hysteria HTTP-01 ACME because nginx may own ports 80/443.
+        # Expected certificate source: certbot DNS-01 or an existing nginx certificate.
+        local cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
+        local key="/etc/letsencrypt/live/${domain}/privkey.pem"
+        if [[ ! -f "$cert" || ! -f "$key" ]]; then
+            print_error "Certificate not found for ${domain}."
+            print_info "Use certbot DNS-01 or place certificates at:"
+            print_info "  ${cert}"
+            print_info "  ${key}"
+            return 1
         fi
-
         cat > "$HY2_CONFIG" << YAMLEOF
 listen: ${listen_line}
 
 tls:
-  cert: ${TLS_CERT}
-  key: ${TLS_KEY}
+  cert: ${cert}
+  key: ${key}
 
 auth:
   type: http
@@ -874,7 +873,7 @@ hy2_install_server() {
     echo -e "  Host      : ${CYAN}${host}${NC}"
     echo -e "  Port      : ${CYAN}${port}/UDP${NC}"
     if [[ -n "$domain" ]]; then
-        echo -e "  TLS       : ${GREEN}ACME auto-cert (${domain})${NC}"
+        echo -e "  TLS       : ${GREEN}External certbot certificate (${domain})${NC}"
     else
         echo -e "  TLS       : ${YELLOW}Self-signed — clients need 'insecure=true'${NC}"
     fi

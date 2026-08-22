@@ -290,24 +290,34 @@ ensure_packages() {
 }
 
 # ── Version fetchers ──────────────────────────────────────────
+# NOTE: all GitHub calls use `-L` so we always land on the final
+# redirected URL (GitHub renames/moves repos over time — e.g. the
+# Hysteria2 repo moved from apernet/hysteria to HyNetworks/hysteria —
+# and a bare `curl -sI` without `-L` only captures the *first* hop,
+# which may not contain the version tag at all).
+_GH_UA=(-H "User-Agent: singbox-reality-tunnel")
 
 # fetch_singbox_version [stable|prerelease]  → sets SINGBOX_VERSION
 fetch_singbox_version() {
     local type="${1:-stable}" location ver
     if [[ "$type" == "prerelease" ]]; then
-        ver=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" \
+        ver=$(curl -s "${_GH_UA[@]}" "https://api.github.com/repos/SagerNet/sing-box/releases" \
               | grep '"tag_name"' | head -1 | grep -oP '"v\K[0-9][^"]+' | head -1)
         if [[ -z "$ver" ]]; then
-            ver=$(curl -s "https://github.com/SagerNet/sing-box/releases" \
+            ver=$(curl -sL "https://github.com/SagerNet/sing-box/releases" \
                   | grep -oP 'tag/v\K[0-9]+\.[0-9]+\.[0-9]+-[^"]+' | head -1)
         fi
     else
-        location=$(curl -sI "https://github.com/SagerNet/sing-box/releases/latest" \
-                   | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
+        location=$(curl -sIL "https://github.com/SagerNet/sing-box/releases/latest" \
+                   | grep -i '^location:' | tail -1 | tr -d '\r' | awk '{print $2}')
         ver=$(echo "$location" | grep -oP 'tag/v\K[0-9][^/\s]+' | head -1)
         if [[ -z "$ver" ]]; then
-            ver=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" \
+            ver=$(curl -s "${_GH_UA[@]}" "https://api.github.com/repos/SagerNet/sing-box/releases/latest" \
                   | grep '"tag_name"' | grep -oP '"v\K[0-9][^"]+' | head -1)
+        fi
+        if [[ -z "$ver" ]]; then
+            ver=$(curl -sL "https://github.com/SagerNet/sing-box/releases" \
+                  | grep -oP 'tag/v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
         fi
     fi
     SINGBOX_VERSION="$ver"
@@ -316,17 +326,23 @@ fetch_singbox_version() {
 }
 
 # fetch_hysteria2_version  → sets HY2_VERSION
+# Upstream repo moved: apernet/hysteria → HyNetworks/hysteria.
+# We hit the new repo directly first, and fall back to the old
+# path (GitHub 301-redirects it automatically) for safety.
 fetch_hysteria2_version() {
-    local location ver
-    location=$(curl -sI "https://github.com/apernet/hysteria/releases/latest" \
-               | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
-    ver=$(echo "$location" | grep -oP 'app/v\K[0-9][^/\s]+' | head -1)
+    local location ver repo
+    for repo in HyNetworks/hysteria apernet/hysteria; do
+        location=$(curl -sIL "https://github.com/${repo}/releases/latest" \
+                   | grep -i '^location:' | tail -1 | tr -d '\r' | awk '{print $2}')
+        ver=$(echo "$location" | grep -oP 'app/v\K[0-9][^/\s]+' | head -1)
+        [[ -n "$ver" ]] && break
+    done
     if [[ -z "$ver" ]]; then
-        ver=$(curl -s "https://api.github.com/repos/apernet/hysteria/releases/latest" \
+        ver=$(curl -s "${_GH_UA[@]}" "https://api.github.com/repos/HyNetworks/hysteria/releases/latest" \
               | grep '"tag_name"' | grep -oP 'app/v\K[0-9][^"]+' | head -1)
     fi
     if [[ -z "$ver" ]]; then
-        ver=$(curl -s "https://github.com/apernet/hysteria/releases" \
+        ver=$(curl -sL "https://github.com/HyNetworks/hysteria/releases" \
               | grep -oP 'app/v\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     fi
     HY2_VERSION="$ver"

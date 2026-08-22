@@ -46,7 +46,7 @@ hy2_install_binary() {
     tmp_dir=$(mktemp -d)
 
     print_info "Downloading Hysteria2 v${version} (${arch})..."
-    local url="https://github.com/apernet/hysteria/releases/download/app%2Fv${version}/hysteria-linux-${arch}"
+    local url="https://github.com/HyNetworks/hysteria/releases/download/app%2Fv${version}/hysteria-linux-${arch}"
 
     if ! curl -L --progress-bar -o "${tmp_dir}/hysteria" "$url"; then
         print_error "Download failed. Check internet or version."

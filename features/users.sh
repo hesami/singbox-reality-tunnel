@@ -485,11 +485,11 @@ users_expire_check() {
 
     print_warn "${count} expired user(s) found. Disabling..."
 
-    echo "$expired_json" | DB_PATH="$DB_PATH" python3 - <<'PYEOF'
-import json, sqlite3, os, sys
+    EXPIRED_JSON="$expired_json" DB_PATH="$DB_PATH" python3 - <<'PYEOF'
+import json, sqlite3, os
 
 db_path = os.environ["DB_PATH"]
-uuids   = json.load(sys.stdin)
+uuids   = json.loads(os.environ["EXPIRED_JSON"])
 conn    = sqlite3.connect(db_path)
 for uuid in uuids:
     conn.execute("UPDATE users SET enabled=0 WHERE uuid=?", (uuid,))

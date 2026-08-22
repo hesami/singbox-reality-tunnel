@@ -322,7 +322,7 @@ opt_speedtest() {
 opt_reset_all() {
     confirm "Remove ALL singbox-manager sysctl settings and revert to defaults?" "n" || return
     _opt_clean_sysctl
-    sysctl -p "$SYSCTL_FILE" &>/dev/null 2>/dev/null || true
+    sysctl -p "$SYSCTL_FILE" &>/dev/null || true
     # Also reset limits
     sed -i '/singbox-manager/d' /etc/security/limits.conf 2>/dev/null || true
     print_success "All optimizations removed. Reboot recommended."

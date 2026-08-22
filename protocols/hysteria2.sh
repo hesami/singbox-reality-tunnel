@@ -72,7 +72,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml --log-level info
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20

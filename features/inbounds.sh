@@ -471,7 +471,7 @@ PYEOF
 
     # Write hysteria2 config file (different format — YAML)
     hy2_write_config "$port" "$domain" "$up" "$down" "$is" "$ms" "$ic" "$mc" "60s" "20s" "$hop_range"
-    local server_ip; server_ip=$(get_public_ip)
+    server_ip=$(get_public_ip || echo unknown)
     hy2_save_server_info "$server_ip" "$port" "$domain" "$selfcert"
 
     open_port "$port" both

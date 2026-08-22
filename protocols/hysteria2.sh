@@ -223,6 +223,28 @@ from flask import Flask, request, jsonify, Response
 
 app     = Flask(__name__)
 DB_PATH = "/etc/singbox-manager/data/users.db"
+
+# Ensure subscription API can read inbound records even if auth service
+# starts before manager initialization.
+def ensure_db_schema():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS inbounds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tag TEXT UNIQUE NOT NULL,
+        protocol TEXT NOT NULL,
+        domain TEXT DEFAULT '',
+        port INTEGER NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+ensure_db_schema()
+
 HY2_INFO_PATH  = "/etc/hysteria/server.json"
 VLESS_INFO_PATH = "/etc/sing-box/server.json"
 VWS_INFO_PATH  = "/etc/sing-box/server_ws.json"
@@ -418,7 +440,10 @@ def subscription(token):
             links.append(link)
 
     if not links:
-        return Response("No active inbounds configured on this server", status=404)
+        # Return diagnostic information instead of hiding the real issue.
+        with get_db() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM inbounds").fetchone()[0]
+        return Response(f"No active inbounds configured on this server (database inbounds={count})", status=404)
 
     body = base64.b64encode("\n".join(links).encode()).decode()
 

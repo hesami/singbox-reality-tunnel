@@ -121,24 +121,68 @@ rebuild_singbox_config() {
     SINGBOX_LOG="$SINGBOX_LOG" python3 - <<'PYEOF'
 import sqlite3, json, os
 
-db_path    = os.environ["DB_PATH"]
-cfg_path   = os.environ["SINGBOX_CONFIG"]
-log_path   = os.environ["SINGBOX_LOG"]
+db_path  = os.environ["DB_PATH"]
+cfg_path = os.environ["SINGBOX_CONFIG"]
+log_path = os.environ["SINGBOX_LOG"]
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+# Hysteria2 is served by the separate hysteria-server binary and MUST NOT be
+# emitted into sing-box's config.json.
 rows = conn.execute(
-    "SELECT * FROM inbounds WHERE enabled=1 ORDER BY created_at"
+    "SELECT * FROM inbounds WHERE enabled=1 AND protocol!='hysteria2' ORDER BY created_at"
 ).fetchall()
+
+# Merge enabled manager users into every VLESS inbound at rebuild time. This
+# prevents user access from disappearing after any later inbound edit/rebuild.
+try:
+    user_rows = conn.execute(
+        "SELECT uuid, enabled, expires_at, quota_gb, used_bytes FROM users"
+    ).fetchall()
+except Exception:
+    user_rows = []
 conn.close()
+
+from datetime import datetime, timezone
+def user_is_active(u):
+    if int(u["enabled"] or 0) != 1:
+        return False
+    exp = u["expires_at"]
+    if exp:
+        try:
+            dt = datetime.fromisoformat(exp)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > dt:
+                return False
+        except Exception:
+            pass
+    q = float(u["quota_gb"] or 0)
+    if q > 0 and int(u["used_bytes"] or 0) >= int(q * 1024**3):
+        return False
+    return True
+
+active_uuids = [u["uuid"] for u in user_rows if user_is_active(u)]
+managed_uuids = {u["uuid"] for u in user_rows}
 
 inbounds = []
 for row in rows:
     try:
         ib = json.loads(row["config_json"])
-        # keep metadata in generated config for subscription recovery
-        inbounds.append(ib.copy())
-        ib.pop("_meta", None)
+        clean = dict(ib)
+        clean.pop("_meta", None)
+        if not clean.get("type"):
+            continue
+        if clean.get("type") == "vless":
+            existing = [u for u in clean.get("users", []) if u.get("uuid") not in managed_uuids]
+            flow = "xtls-rprx-vision" if row["protocol"] == "vless_reality" else None
+            for uuid in active_uuids:
+                item = {"uuid": uuid}
+                if flow:
+                    item["flow"] = flow
+                existing.append(item)
+            clean["users"] = existing
+        inbounds.append(clean)
     except Exception as e:
         print(f"WARN: skipping inbound {row['tag']}: {e}")
 
@@ -152,22 +196,24 @@ tmp = cfg_path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(config, f, indent=2)
 os.replace(tmp, cfg_path)
-print(f"OK: {len(inbounds)} inbound(s) written")
+print(f"OK: {len(inbounds)} sing-box inbound(s) written")
 PYEOF
 
     local result=$?
-    if [[ $result -eq 0 ]]; then
-        # Validate before reloading
-        if sing-box check -c "$SINGBOX_CONFIG" &>/dev/null; then
-            systemctl is-active --quiet sing-box 2>/dev/null \
-                && systemctl reload-or-restart sing-box \
-                || systemctl start sing-box 2>/dev/null || true
-            print_success "Config rebuilt and service reloaded."
-        else
-            print_error "Config validation failed. Service NOT reloaded."
-            sing-box check -c "$SINGBOX_CONFIG" 2>&1 | sed 's/^/  /'
-            return 1
-        fi
+    [[ $result -eq 0 ]] || return $result
+
+    # If sing-box is not installed yet, writing the config is still successful.
+    command -v sing-box >/dev/null 2>&1 || return 0
+
+    if sing-box check -c "$SINGBOX_CONFIG" &>/dev/null; then
+        systemctl is-active --quiet sing-box 2>/dev/null \
+            && systemctl reload-or-restart sing-box 2>/dev/null \
+            || systemctl start sing-box 2>/dev/null || true
+        print_success "Config rebuilt and service reloaded."
+    else
+        print_error "Config validation failed. Service NOT reloaded."
+        sing-box check -c "$SINGBOX_CONFIG" 2>&1 | sed 's/^/  /'
+        return 1
     fi
 }
 
@@ -424,12 +470,30 @@ _inbound_add_hysteria2() {
 
     [[ ! -f "$HY2_BIN" ]] && { print_error "Hysteria2 not installed."; press_enter; return 1; }
 
+    # The current architecture uses one Hysteria service/config file. Prevent
+    # silently overwriting an existing Hysteria inbound with a second one.
+    local existing_hy2
+    existing_hy2=$(DB_PATH="$DB_PATH" python3 - <<'PYEOF'
+import sqlite3, os
+conn=sqlite3.connect(os.environ['DB_PATH'])
+try:
+    print(conn.execute("SELECT COUNT(*) FROM inbounds WHERE protocol='hysteria2'").fetchone()[0])
+except Exception:
+    print(0)
+finally:
+    conn.close()
+PYEOF
+)
+    if [[ "${existing_hy2:-0}" -gt 0 ]]; then
+        print_error "A Hysteria2 inbound already exists. Edit or delete it before creating another."
+        press_enter; return 1
+    fi
+
     local port domain hop_range tag
     ask port   "  UDP port"    "8443"
     ask domain "  Domain (blank = self-signed)" ""
     tag=$(_inbound_gen_tag "hysteria2")
 
-    # Port hopping
     local hop_range=""
     if confirm "Enable port hopping?" "y"; then
         local h_start h_end
@@ -438,9 +502,17 @@ _inbound_add_hysteria2() {
         hop_range="${h_start}-${h_end}"
     fi
 
-    # Compute QUIC params
+    # Domain mode always uses an existing/Certbot DNS-01 certificate. This
+    # never stops or reconfigures nginx and never requires ports 80/443.
+    if [[ -n "$domain" ]]; then
+        ssl_ensure_certificate "$domain" || {
+            print_error "A valid certificate is required for ${domain}. Hysteria2 inbound was not created."
+            press_enter; return 1
+        }
+    fi
+
     probe_server &>/dev/null || true
-    local bw rtt quic
+    local bw rtt quic is ms ic mc
     bw=$(estimate_bandwidth); rtt=$(measure_rtt "8.8.8.8")
     quic=$(hy2_compute_quic_params "$bw" "$rtt")
     IFS='|' read -r is ms ic mc <<< "$quic"
@@ -449,46 +521,73 @@ _inbound_add_hysteria2() {
     local selfcert="True"
     [[ -n "$domain" ]] && selfcert="False"
 
-    local meta_json
-    local server_ip; server_ip=$(get_public_ip || true)
-    # Do not interpolate untrusted network output directly into Python source.
+    local server_ip meta_json stored_json
+    server_ip=$(get_public_ip 2>/dev/null || true)
+    [[ -n "$server_ip" ]] || server_ip="unknown"
+
     meta_json=$(HY2_PORT="$port" HY2_DOMAIN="$domain" HY2_IP="$server_ip" \
         HY2_SELFCERT="$selfcert" HY2_HOP="$hop_range" python3 - <<'PYEOF'
 import json, os
 print(json.dumps({
-    "port": os.environ.get("HY2_PORT",""),
-    "domain": os.environ.get("HY2_DOMAIN",""),
-    "ip": os.environ.get("HY2_IP","unknown"),
-    "selfcert": os.environ.get("HY2_SELFCERT","True") == "True",
-    "hop_range": os.environ.get("HY2_HOP","")
+    "port": int(os.environ.get("HY2_PORT", "8443")),
+    "domain": os.environ.get("HY2_DOMAIN", ""),
+    "ip": os.environ.get("HY2_IP", "unknown"),
+    "selfcert": os.environ.get("HY2_SELFCERT", "True") == "True",
+    "hop_range": os.environ.get("HY2_HOP", "")
 }))
 PYEOF
-    )
+    ) || { print_error "Failed to build Hysteria2 metadata."; press_enter; return 1; }
 
-    # Store meta for auth_api to build hy2 links
-    inbound_db_add "$tag" "hysteria2" "${domain:-$(get_public_ip)}" "$port" "$meta_json" || {
+    # Keep the same metadata contract as all other inbound types.
+    stored_json=$(META_JSON="$meta_json" python3 - <<'PYEOF'
+import json, os
+print(json.dumps({"_meta": json.loads(os.environ["META_JSON"])}))
+PYEOF
+    ) || { print_error "Failed to serialize Hysteria2 metadata."; press_enter; return 1; }
+
+    # Write and validate runtime configuration BEFORE committing the inbound to DB.
+    hy2_write_config "$port" "$domain" "$up" "$down" "$is" "$ms" "$ic" "$mc" "60s" "20s" "$hop_range" || {
+        print_error "Hysteria2 configuration could not be written. Inbound was not created."
+        press_enter; return 1
+    }
+    hy2_save_server_info "$server_ip" "$port" "$domain" "$selfcert" || {
+        print_error "Failed to save Hysteria2 server metadata."
         press_enter; return 1
     }
 
-    # Write hysteria2 config file (different format — YAML)
-    hy2_write_config "$port" "$domain" "$up" "$down" "$is" "$ms" "$ic" "$mc" "60s" "20s" "$hop_range"
-    server_ip=$(get_public_ip || echo unknown)
-    hy2_save_server_info "$server_ip" "$port" "$domain" "$selfcert"
-
-    open_port "$port" both
-    [[ -n "$hop_range" ]] && {
+    open_port "$port" udp
+    if [[ -n "$hop_range" ]]; then
         local h_s="${hop_range%-*}" h_e="${hop_range#*-}"
         open_port "${h_s}:${h_e}" udp 2>/dev/null || true
+    fi
+
+    # Auth must be available before Hysteria accepts clients.
+    systemctl reset-failed hysteria-auth hysteria-server 2>/dev/null || true
+    systemctl restart hysteria-auth 2>/dev/null || systemctl start hysteria-auth 2>/dev/null || {
+        print_error "hysteria-auth failed to start. Inbound was not created."
+        journalctl -u hysteria-auth --no-pager -n 20 2>/dev/null | sed 's/^/  /'
+        press_enter; return 1
     }
 
-    systemctl is-active --quiet hysteria-server 2>/dev/null \
-        && systemctl restart hysteria-server \
-        || systemctl start hysteria-server 2>/dev/null || true
-    systemctl restart hysteria-auth 2>/dev/null || true
+    systemctl restart hysteria-server 2>/dev/null || systemctl start hysteria-server 2>/dev/null || true
+    sleep 1
+    if ! systemctl is-active --quiet hysteria-server 2>/dev/null; then
+        print_error "hysteria-server failed to start. Inbound was not created."
+        journalctl -u hysteria-server --no-pager -n 30 2>/dev/null | sed 's/^/  /'
+        press_enter; return 1
+    fi
+
+    inbound_db_add "$tag" "hysteria2" "${domain:-$server_ip}" "$port" "$stored_json" || {
+        print_error "Runtime started but database commit failed; stopping Hysteria2 to keep state consistent."
+        systemctl stop hysteria-server 2>/dev/null || true
+        press_enter; return 1
+    }
+
+    [[ -n "$domain" ]] && ssl_save_domain "$domain"
 
     echo ""
-    print_success "Hysteria2 inbound created: ${tag}"
-    [[ -n "$hop_range" ]] && print_warn "Remember: open UDP ${hop_range} in VPS provider firewall!"
+    print_success "Hysteria2 inbound created and running: ${tag}"
+    [[ -n "$hop_range" ]] && print_warn "Remember: allow UDP ${hop_range} in the VPS provider firewall."
     press_enter
 }
 
@@ -659,39 +758,75 @@ PYEOF
 
 _inbound_edit_hy2() {
     local tag="$1" cfg="$2"
-    local cur_port cur_hop
-    cur_port=$(echo "$cfg" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('port',''))" 2>/dev/null)
-    cur_hop=$(echo  "$cfg" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('hop_range',''))" 2>/dev/null)
-
-    local new_port new_hop
-    ask new_port "  Port"        "$cur_port"
-    ask new_hop  "  Hop range"   "$cur_hop"
-
-    local new_cfg
-    new_cfg=$(NEW_PORT="$new_port" NEW_HOP="$new_hop" CFG_JSON="$cfg" python3 - <<'PYEOF'
-import json, os
-cfg = json.loads(os.environ["CFG_JSON"])
-cfg["port"]      = os.environ["NEW_PORT"] or cfg.get("port","")
-cfg["hop_range"] = os.environ["NEW_HOP"]  or cfg.get("hop_range","")
-print(json.dumps(cfg))
+    local cur_port cur_hop domain
+    cur_port=$(CFG_JSON="$cfg" python3 - <<'PYEOF'
+import json,os
+d=json.loads(os.environ['CFG_JSON']); m=d.get('_meta', d)
+print(m.get('port',''))
 PYEOF
 )
-    inbound_db_update "$tag" "port"        "$new_port"
-    inbound_db_update "$tag" "config_json" "$new_cfg"
+    cur_hop=$(CFG_JSON="$cfg" python3 - <<'PYEOF'
+import json,os
+d=json.loads(os.environ['CFG_JSON']); m=d.get('_meta', d)
+print(m.get('hop_range',''))
+PYEOF
+)
+    domain=$(CFG_JSON="$cfg" python3 - <<'PYEOF'
+import json,os
+d=json.loads(os.environ['CFG_JSON']); m=d.get('_meta', d)
+print(m.get('domain',''))
+PYEOF
+)
 
-    # Rewrite hysteria2 yaml
-    local domain; domain=$(echo "$cfg" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('domain',''))" 2>/dev/null)
-    local selfcert; selfcert=$(echo "$cfg" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('selfcert','True'))" 2>/dev/null)
+    local new_port new_hop
+    ask new_port "  Port"      "$cur_port"
+    ask new_hop  "  Hop range" "$cur_hop"
+    [[ -n "$new_port" ]] || new_port="$cur_port"
+
     probe_server &>/dev/null || true
-    local bw rtt quic up down
+    local bw rtt quic up down is ms ic mc
     bw=$(estimate_bandwidth); rtt=$(measure_rtt "8.8.8.8")
     quic=$(hy2_compute_quic_params "$bw" "$rtt")
     IFS='|' read -r is ms ic mc <<< "$quic"
     up=$(( bw * 85 / 100 )); down=$(( bw * 85 / 100 ))
-    hy2_write_config "${new_port:-$cur_port}" "$domain" "$up" "$down" "$is" "$ms" "$ic" "$mc" "60s" "20s" "${new_hop:-$cur_hop}"
-    systemctl restart hysteria-server 2>/dev/null || true
 
-    print_success "Hysteria2 inbound '${tag}' updated."
+    # Validate/write runtime first; DB is updated only after a successful restart.
+    hy2_write_config "$new_port" "$domain" "$up" "$down" "$is" "$ms" "$ic" "$mc" "60s" "20s" "$new_hop" || {
+        print_error "Hysteria2 configuration update failed. Database was not changed."
+        press_enter; return 1
+    }
+
+    systemctl reset-failed hysteria-server 2>/dev/null || true
+    systemctl restart hysteria-server 2>/dev/null || true
+    sleep 1
+    if ! systemctl is-active --quiet hysteria-server 2>/dev/null; then
+        print_error "Hysteria2 failed after update. Database was not changed."
+        journalctl -u hysteria-server --no-pager -n 30 2>/dev/null | sed 's/^/  /'
+        press_enter; return 1
+    fi
+
+    local new_cfg
+    new_cfg=$(NEW_PORT="$new_port" NEW_HOP="$new_hop" CFG_JSON="$cfg" python3 - <<'PYEOF'
+import json, os
+cfg=json.loads(os.environ['CFG_JSON'])
+if '_meta' in cfg and isinstance(cfg['_meta'], dict):
+    m=cfg['_meta']
+else:
+    m=cfg
+m['port']=int(os.environ['NEW_PORT'])
+m['hop_range']=os.environ['NEW_HOP']
+if '_meta' in cfg:
+    out=cfg
+else:
+    out={'_meta': m}
+print(json.dumps(out))
+PYEOF
+)
+    inbound_db_update "$tag" "port" "$new_port" >/dev/null
+    inbound_db_update "$tag" "config_json" "$new_cfg" >/dev/null
+    open_port "$new_port" udp
+
+    print_success "Hysteria2 inbound '${tag}' updated and running."
     press_enter
 }
 
@@ -732,17 +867,39 @@ inbound_toggle() {
     local json; json=$(inbound_db_get "$tag")
     [[ -z "$json" ]] && { print_error "Not found."; press_enter; return; }
 
-    local cur; cur=$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['enabled'])")
-    local new_val; [[ "$cur" == "1" ]] && new_val=0 || new_val=1
-    inbound_db_update "$tag" "enabled" "$new_val"
+    local cur proto
+    cur=$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['enabled'])")
+    proto=$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['protocol'])")
 
-    local proto; proto=$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['protocol'])")
-    if [[ "$proto" == "hysteria2" ]]; then
-        systemctl restart hysteria-server 2>/dev/null || true
+    if [[ "$cur" == "1" ]]; then
+        inbound_db_update "$tag" "enabled" "0" >/dev/null
+        if [[ "$proto" == "hysteria2" ]]; then
+            systemctl stop hysteria-server 2>/dev/null || true
+        else
+            rebuild_singbox_config || true
+        fi
+        print_success "Disabled."
     else
-        rebuild_singbox_config
+        if [[ "$proto" == "hysteria2" ]]; then
+            systemctl reset-failed hysteria-server 2>/dev/null || true
+            systemctl restart hysteria-auth 2>/dev/null || systemctl start hysteria-auth 2>/dev/null || true
+            systemctl restart hysteria-server 2>/dev/null || systemctl start hysteria-server 2>/dev/null || true
+            sleep 1
+            if ! systemctl is-active --quiet hysteria-server 2>/dev/null; then
+                print_error "Could not enable Hysteria2; service is not running."
+                press_enter; return 1
+            fi
+            inbound_db_update "$tag" "enabled" "1" >/dev/null
+        else
+            inbound_db_update "$tag" "enabled" "1" >/dev/null
+            if ! rebuild_singbox_config; then
+                inbound_db_update "$tag" "enabled" "0" >/dev/null
+                print_error "Enable failed; database state rolled back."
+                press_enter; return 1
+            fi
+        fi
+        print_success "Enabled."
     fi
-    [[ "$new_val" -eq 1 ]] && print_success "Enabled." || print_success "Disabled."
     press_enter
 }
 
@@ -754,17 +911,19 @@ inbound_delete() {
     local tag; read -r tag
     [[ -z "$tag" ]] && return
 
+    local json; json=$(inbound_db_get "$tag")
+    [[ -z "$json" ]] && { print_error "Not found."; press_enter; return; }
     confirm "Delete inbound '${tag}'?" "n" || return
 
-    local json; json=$(inbound_db_get "$tag")
-    local proto; proto=$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['protocol'])" 2>/dev/null)
-
+    local proto
+    proto=$(echo "$json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['protocol'])" 2>/dev/null)
     inbound_db_delete "$tag"
 
     if [[ "$proto" == "hysteria2" ]]; then
-        systemctl restart hysteria-server 2>/dev/null || true
+        systemctl stop hysteria-server 2>/dev/null || true
+        rm -f "$HY2_CONFIG" "$HY2_INFO"
     else
-        rebuild_singbox_config
+        rebuild_singbox_config || true
     fi
     print_success "Inbound '${tag}' deleted."
     press_enter

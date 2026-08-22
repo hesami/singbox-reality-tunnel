@@ -222,7 +222,7 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
 
 app     = Flask(__name__)
-DB_PATH = "/etc/singbox-manager/data/users.db"
+DB_PATH = os.environ.get("SINGBOX_MANAGER_DB", "/etc/singbox-manager/data/users.db")
 
 # Ensure subscription API can read inbound records even if auth service
 # starts before manager initialization.
@@ -398,7 +398,16 @@ def subscription(token):
     for ib in inbounds:
         proto = ib["protocol"]
         try:
-            meta = json.loads(ib["config_json"]).get("_meta", {})
+            parsed = json.loads(ib["config_json"])
+            # v3.0.6 and older stored Hysteria2 metadata as a flat JSON object,
+            # while newer inbounds use {"_meta": {...}}. Support both so an
+            # upgrade immediately repairs existing subscriptions.
+            if isinstance(parsed, dict) and isinstance(parsed.get("_meta"), dict):
+                meta = parsed["_meta"]
+            elif proto == "hysteria2" and isinstance(parsed, dict):
+                meta = parsed
+            else:
+                meta = {}
         except Exception:
             meta = {}
 
@@ -652,15 +661,15 @@ hy2_write_config() {
     mkdir -p /etc/hysteria
 
     if [[ -n "$domain" ]]; then
-        # External certificate mode. Never use Hysteria HTTP-01 ACME because nginx may own ports 80/443.
-        # Expected certificate source: certbot DNS-01 or an existing nginx certificate.
-        local cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
-        local key="/etc/letsencrypt/live/${domain}/privkey.pem"
+        # External certificate mode. Never use Hysteria HTTP-01 ACME because
+        # nginx/site may own ports 80/443. ssl_ensure_certificate only reuses
+        # an existing Certbot cert or performs a DNS-01 challenge.
+        ssl_ensure_certificate "$domain" || return 1
+        local cert key
+        cert=$(ssl_get_cert_path "$domain")
+        key=$(ssl_get_key_path "$domain")
         if [[ ! -f "$cert" || ! -f "$key" ]]; then
-            print_error "Certificate not found for ${domain}."
-            print_info "Use certbot DNS-01 or place certificates at:"
-            print_info "  ${cert}"
-            print_info "  ${key}"
+            print_error "Certificate files are not available for ${domain}."
             return 1
         fi
         cat > "$HY2_CONFIG" << YAMLEOF
@@ -854,14 +863,13 @@ hy2_install_server() {
     hy2_create_server_service
     hy2_create_auth_service
     hy2_install_sync_cron
-    open_port "$port" both
+    open_port "$port" udp
     open_port "$HY2_AUTH_PORT" tcp
 
-    service_start hysteria-server || { press_enter; return 1; }
-    service_start hysteria-auth   || { press_enter; return 1; }
-
-    # Ensure central DB is ready
+    # Ensure central DB exists before the auth API starts accepting requests.
     db_init
+    service_start hysteria-auth   || { press_enter; return 1; }
+    service_start hysteria-server || { press_enter; return 1; }
 
     # ── Success ──────────────────────────────────────────────
     local host="${domain:-$server_ip}"
@@ -873,7 +881,7 @@ hy2_install_server() {
     echo -e "  Host      : ${CYAN}${host}${NC}"
     echo -e "  Port      : ${CYAN}${port}/UDP${NC}"
     if [[ -n "$domain" ]]; then
-        echo -e "  TLS       : ${GREEN}External certbot certificate (${domain})${NC}"
+        echo -e "  TLS       : ${GREEN}Certbot certificate (${domain}, nginx-safe)${NC}"
     else
         echo -e "  TLS       : ${YELLOW}Self-signed — clients need 'insecure=true'${NC}"
     fi

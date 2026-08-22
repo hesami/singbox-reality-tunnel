@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  manager.sh — sing-box Proxy Manager  v3.0.0
+#  manager.sh — sing-box Proxy Manager  v3.0.9
 #  Entry point: sources all modules and shows main menu.
 #
 #  Usage:  sudo bash manager.sh
@@ -36,6 +36,40 @@ mkdir -p "$BASE_DIR" "$DATA_DIR" "$LOG_DIR"
 
 # ── Root check ─────────────────────────────────────────────────
 check_root
+
+# ── Safe upgrade migration ─────────────────────────────────────
+# Refresh manager-owned auth/subscription code and normalize legacy Hysteria2
+# DB metadata. This never changes nginx/apache or website configuration.
+_runtime_upgrade_migrate() {
+    mkdir -p "$DB_DIR" "$LOG_DIR" /etc/hysteria
+    db_init >/dev/null 2>&1 || true
+
+    DB_PATH="$DB_PATH" python3 - <<'PYEOF' >/dev/null 2>&1 || true
+import sqlite3, json, os
+p=os.environ['DB_PATH']
+conn=sqlite3.connect(p)
+conn.row_factory=sqlite3.Row
+try:
+    rows=conn.execute("SELECT id, config_json FROM inbounds WHERE protocol='hysteria2'").fetchall()
+    for r in rows:
+        try:
+            d=json.loads(r['config_json'] or '{}')
+        except Exception:
+            continue
+        if isinstance(d, dict) and '_meta' not in d and any(k in d for k in ('port','domain','ip','selfcert','hop_range')):
+            conn.execute("UPDATE inbounds SET config_json=? WHERE id=?", (json.dumps({'_meta': d}), r['id']))
+    conn.commit()
+finally:
+    conn.close()
+PYEOF
+
+    if [[ -f /etc/systemd/system/hysteria-auth.service || -f "$HY2_AUTH_API" ]]; then
+        hy2_write_auth_api >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl restart hysteria-auth >/dev/null 2>&1 || true
+    fi
+}
+_runtime_upgrade_migrate
 
 # ══════════════════════════════════════════════════════════════
 #  Overall status snapshot (shown at top of main menu)

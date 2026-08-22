@@ -27,12 +27,11 @@ users_active_engines() {
 users_sub_url() {
     local sub_token="$1"
     ssl_load_domain 2>/dev/null || true
-    if [[ -n "${DOMAIN:-}" ]]; then
-        # Use HTTPS on standard port if domain available
-        echo "https://${DOMAIN}:${HY2_AUTH_PORT}/sub/${sub_token}"
-    else
-        echo "http://$(get_public_ip):${HY2_AUTH_PORT}/sub/${sub_token}"
-    fi
+    local host="${DOMAIN:-}"
+    [[ -n "$host" ]] || host=$(get_public_ip 2>/dev/null || echo "127.0.0.1")
+    # hysteria-auth serves plain HTTP on its dedicated port. Do not advertise
+    # HTTPS here unless a separate TLS listener is explicitly implemented.
+    echo "http://${host}:${HY2_AUTH_PORT}/sub/${sub_token}"
 }
 
 # ── Add user (interactive — protocol-aware) ────────────────────
@@ -62,6 +61,11 @@ print(exp.isoformat())
     if ! db_add_user "$uuid" "$label" "$quota_gb" "$sub_token" '{}' "$expiry_iso"; then
         print_error "Failed to add user to database."
         press_enter; return 1
+    fi
+
+    # Keep DB-backed VLESS configs and runtime config synchronized.
+    if declare -F rebuild_singbox_config >/dev/null 2>&1; then
+        rebuild_singbox_config >/dev/null 2>&1 || true
     fi
 
     # Add UUID to all active vless inbounds and reload

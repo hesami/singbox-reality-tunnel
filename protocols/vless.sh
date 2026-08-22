@@ -213,21 +213,12 @@ if __name__ == "__main__":
 PYEOF
     chmod +x "$VLESS_QUOTA_SCRIPT"
 
-    ensure_packages cron
-    systemctl enable cron &>/dev/null || true
-    systemctl start  cron &>/dev/null || true
-
     local cron_line="*/5 * * * * /usr/bin/python3 ${VLESS_QUOTA_SCRIPT} >/dev/null 2>&1"
     { crontab -l 2>/dev/null || true; } \
         | { grep -v "vless_quota\|quota_enforce" || true; } > /tmp/vless_cron.tmp
     echo "$cron_line" >> /tmp/vless_cron.tmp
-    if crontab /tmp/vless_cron.tmp; then
-        rm -f /tmp/vless_cron.tmp
-        print_success "Quota enforcer installed (cron every 5 min)."
-    else
-        rm -f /tmp/vless_cron.tmp
-        print_error "Could not install quota-enforcer cron job (is 'cron' installed and running?)."
-    fi
+    crontab /tmp/vless_cron.tmp && rm -f /tmp/vless_cron.tmp
+    print_success "Quota enforcer installed (cron every 5 min)."
 }
 
 # ── Add user to sing-box config ────────────────────────────────
@@ -379,19 +370,11 @@ PYEOF
     chmod +x "$VLESS_SYNC_SCRIPT"
 
     local cron_line="*/5 * * * * /usr/bin/python3 ${VLESS_SYNC_SCRIPT} >/dev/null 2>&1"
-    ensure_packages cron
-    systemctl enable cron &>/dev/null || true
-    systemctl start  cron &>/dev/null || true
     { crontab -l 2>/dev/null || true; } \
         | { grep -v "vless_sync\|traffic_sync" || true; } > /tmp/vless_sync_cron.tmp
     echo "$cron_line" >> /tmp/vless_sync_cron.tmp
-    if crontab /tmp/vless_sync_cron.tmp; then
-        rm -f /tmp/vless_sync_cron.tmp
-        print_success "Traffic sync installed (cron every 5 min)."
-    else
-        rm -f /tmp/vless_sync_cron.tmp
-        print_error "Could not install traffic-sync cron job (is 'cron' installed and running?)."
-    fi
+    crontab /tmp/vless_sync_cron.tmp && rm -f /tmp/vless_sync_cron.tmp
+    print_success "Traffic sync installed (cron every 5 min)."
 }
 
 # ── Server install wizard ──────────────────────────────────────

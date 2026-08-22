@@ -576,19 +576,11 @@ PYEOF
 
 hy2_install_sync_cron() {
     local cron_line="*/2 * * * * /usr/bin/python3 ${HY2_SYNC_SCRIPT} >/dev/null 2>&1"
-    ensure_packages cron
-    systemctl enable cron &>/dev/null || true
-    systemctl start  cron &>/dev/null || true
     { crontab -l 2>/dev/null || true; } \
         | { grep -v "sync_traffic\|hy2_sync" || true; } > /tmp/hy2_cron.tmp
     echo "$cron_line" >> /tmp/hy2_cron.tmp
-    if crontab /tmp/hy2_cron.tmp; then
-        rm -f /tmp/hy2_cron.tmp
-        print_success "Traffic sync cron installed (every 2 min)."
-    else
-        rm -f /tmp/hy2_cron.tmp
-        print_error "Could not install traffic-sync cron job (is 'cron' installed and running?)."
-    fi
+    crontab /tmp/hy2_cron.tmp && rm -f /tmp/hy2_cron.tmp
+    print_success "Traffic sync cron installed (every 2 min)."
 }
 
 # ── Generate server config YAML ────────────────────────────────

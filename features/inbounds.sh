@@ -449,11 +449,20 @@ _inbound_add_hysteria2() {
     [[ -n "$domain" ]] && selfcert="False"
 
     local meta_json
-    local server_ip; server_ip=$(get_public_ip)
-    meta_json=$(python3 -c "
-import json
-print(json.dumps({'port':'${port}','domain':'${domain}','ip':'${server_ip}','selfcert':${selfcert},'hop_range':'${hop_range}'}))
-")
+    local server_ip; server_ip=$(get_public_ip || true)
+    # Do not interpolate untrusted network output directly into Python source.
+    # Some providers return HTML/WAF pages instead of an IP, which used to
+    # break this block with: SyntaxError: unterminated string literal.
+    HY2_PORT="$port" HY2_DOMAIN="$domain" HY2_IP="$server_ip"     HY2_SELFCERT="$selfcert" HY2_HOP="$hop_range" python3 - <<'PYEOF'
+import json, os
+print(json.dumps({
+    "port": os.environ.get("HY2_PORT",""),
+    "domain": os.environ.get("HY2_DOMAIN",""),
+    "ip": os.environ.get("HY2_IP","unknown"),
+    "selfcert": os.environ.get("HY2_SELFCERT","True") == "True",
+    "hop_range": os.environ.get("HY2_HOP","")
+}))
+PYEOF
 
     # Store meta for auth_api to build hy2 links
     inbound_db_add "$tag" "hysteria2" "${domain:-$(get_public_ip)}" "$port" "$meta_json" || {

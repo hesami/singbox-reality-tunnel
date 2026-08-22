@@ -204,7 +204,7 @@ PYEOF
 )
         local hy2_uuid_disp hy2_token_disp
         hy2_uuid_disp=$(echo "$h_uuid_show" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('uuid',''))" 2>/dev/null || echo "")
-        hy2_token_disp=$(echo "$h_uuid_show" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null || echo "")
+        hy2_token_disp=$(echo "$h_uuid_show"| python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))"2>/dev/null || echo "")
 
         echo -e "  ${BOLD}── Hysteria2 ────────────────────────────────${NC}"
         echo -e "  Port      : ${CYAN}${HINFO_PORT}/UDP${NC}"

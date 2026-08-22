@@ -93,15 +93,15 @@ probe_server() {
     fi
 
     # Public IP (try IPv4, fall back to IPv6)
-    SRV_PUBLIC_IP=$(get_public_ip)
+    SRV_PUBLIC_IP=$(get_public_ip || echo "unknown")
 
     # Hostname
     SRV_HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "unknown")
 
     # Location via IP geo (lightweight, no API key required)
     if [[ "$SRV_PUBLIC_IP" != "unknown" ]]; then
-        SRV_LOCATION=$(curl -sf --connect-timeout 5 "https://ipapi.co/${SRV_PUBLIC_IP}/country/" 2>/dev/null \
-                       | tr -d '[:space:]' | head -c 5)
+        SRV_LOCATION=$(curl -sf --connect-timeout 5 "https://ipapi.co/${SRV_PUBLIC_IP}/country/" 2>/dev/null || true)
+        SRV_LOCATION=$(echo "$SRV_LOCATION" | tr -d '[:space:]' | head -c 5)
         [[ "$SRV_LOCATION" =~ ^[A-Za-z]{2}$ ]] || SRV_LOCATION="XX"
     else
         SRV_LOCATION="XX"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  manager.sh — sing-box Proxy Manager  v3.0.11
+#  manager.sh — sing-box Proxy Manager  v3.0.12
 #  Entry point: sources all modules and shows main menu.
 #
 #  Usage:  sudo bash manager.sh
@@ -20,6 +20,7 @@ _src core/common.sh
 _src core/system.sh
 _src core/db.sh
 _src protocols/vless.sh
+_src protocols/xray.sh
 _src protocols/hysteria2.sh
 _src protocols/vless_ws.sh
 _src protocols/vless_grpc.sh

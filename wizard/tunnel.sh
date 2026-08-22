@@ -1,551 +1,308 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════
-#  wizard/tunnel.sh — Two-server tunnel setup wizard
-#
-#  Step 1: Run on foreign server  → installs proxy, shows info
-#  Step 2: Run on Iran server     → installs relay client
-#
-#  Depends on: core/*  protocols/vless.sh  protocols/hysteria2.sh
-# ═══════════════════════════════════════════════════════════════
+# Two-server tunnel wizard. Reality tunnel uses Xray-core end-to-end.
+# Existing nginx, web sites and the normal sing-box server are never modified.
 
-wizard_tunnel() {
-    print_banner
-    print_header "Tunnel Setup — Two-Server Mode"
-    echo ""
-    echo -e "  ${BOLD}How a tunnel works:${NC}"
-    echo ""
-    echo -e "   [Client in Iran]"
-    echo -e "         ↓  connects to Iran relay"
-    echo -e "   [Iran server]  ←── you need a cheap Iranian VPS"
-    echo -e "         ↓  encrypted tunnel"
-    echo -e "   [Foreign server]  ←── your main VPS abroad (Germany/NL/etc.)"
-    echo -e "         ↓  normal traffic to the internet"
-    echo -e "   [Internet]"
-    echo ""
-    echo -e "  ${YELLOW}${BOLD}This wizard must be run TWICE:${NC}"
-    echo -e "  ${DIM}Once on the foreign server, once on the Iran server.${NC}"
-    echo ""
-
-    print_header "Which server are you on right now?"
-    echo ""
-    echo -e "  ${CYAN}1)${NC}  ${BOLD}Foreign server${NC}  ${DIM}(abroad — Germany, Netherlands, etc.)${NC}"
-    echo -e "     ${DIM}→ Run this FIRST. It will install the proxy and show you the${NC}"
-    echo -e "       ${DIM}settings you need to enter on the Iran server.${NC}"
-    echo ""
-    echo -e "  ${CYAN}2)${NC}  ${BOLD}Iran server${NC}  ${DIM}(relay — inside Iran)${NC}"
-    echo -e "     ${DIM}→ Run this SECOND. You will need the output from Step 1.${NC}"
-    echo -e "       ${DIM}Installs the relay client that tunnels through the foreign server.${NC}"
-    echo ""
-    echo -e "  ${CYAN}0)${NC}  Back"
-    menu_prompt
-
-    case "$MENU_CHOICE" in
-        1) _wizard_tunnel_foreign ;;
-        2) _wizard_tunnel_iran    ;;
-        0) return ;;
-        *) print_warn "Invalid choice."; sleep 1; wizard_tunnel ;;
-    esac
-}
-
-# Persist tunnel-created inbounds in the same DB used by User Management
-# and the unified subscription API. Re-running updates the same record.
-_tunnel_upsert_inbound() {
-    local tag="$1" proto="$2" domain="$3" port="$4" cfg="$5"
-    TAG="$tag" PROTO="$proto" DOMAIN="$domain" PORT="$port" CFG="$cfg" \
-    DB_PATH="$DB_PATH" python3 - <<'PYEOF'
-import sqlite3, os
-conn = sqlite3.connect(os.environ["DB_PATH"])
-conn.execute("""
-INSERT INTO inbounds (tag, protocol, domain, port, enabled, config_json)
-VALUES (?, ?, ?, ?, 1, ?)
-ON CONFLICT(tag) DO UPDATE SET
-    protocol=excluded.protocol,
-    domain=excluded.domain,
-    port=excluded.port,
-    enabled=1,
-    config_json=excluded.config_json
-""", (
-    os.environ["TAG"], os.environ["PROTO"], os.environ["DOMAIN"],
-    int(os.environ["PORT"]), os.environ["CFG"]
-))
-conn.commit()
-conn.close()
-PYEOF
-}
-
-# Return success when a TCP listen port is occupied by another process.
-# Reusing a port already owned by sing-box is allowed for idempotent reruns.
 _tunnel_tcp_port_busy() {
     local port="$1" line
     line=$(ss -H -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$" {print}' | head -n1)
-    [[ -n "$line" && "$line" != *"sing-box"* ]]
+    [[ -n "$line" && "$line" != *"xray"* ]]
 }
 
-# ══════════════════════════════════════════════════════════════
-#  Foreign server — installs proxy, prints settings for Iran side
-# ══════════════════════════════════════════════════════════════
+_tunnel_test_socks() {
+    local port="$1" timeout="${2:-20}" out
+    out=$(curl -fsS --max-time "$timeout" --connect-timeout 10 \
+        --socks5-hostname "127.0.0.1:${port}" https://api.ipify.org 2>/tmp/tunnel-curl.err \
+        | tr -d '[:space:]' || true)
+    [[ "$out" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || "$out" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    printf '%s\n' "$out"
+}
+
+_tunnel_hy2_client_service() {
+    local ip="$1" port="$2" uuid="$3" token="$4" listen_host="$5" socks_port="$6"
+    mkdir -p /etc/hysteria
+    cat > /etc/hysteria/tunnel-client.yaml <<EOF2
+server: ${ip}:${port}
+auth: "${uuid}:${token}"
+tls:
+  insecure: true
+socks5:
+  listen: ${listen_host}:${socks_port}
+EOF2
+    cat > /etc/systemd/system/hysteria-tunnel-client.service <<EOF2
+[Unit]
+Description=Hysteria2 Tunnel Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hysteria client -c /etc/hysteria/tunnel-client.yaml --log-level info
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF2
+    systemctl daemon-reload
+    systemctl enable hysteria-tunnel-client >/dev/null 2>&1 || true
+    systemctl restart hysteria-tunnel-client
+}
+
+_tunnel_frontend_write() {
+    local public_port="$1" reality_port="$2" hy2_port="$3" reality_ok="$4" hy2_ok="$5"
+    local outbounds final
+    if [[ "$reality_ok" == "true" && "$hy2_ok" == "true" ]]; then
+        outbounds="[
+    {\"type\":\"socks\",\"tag\":\"reality-local\",\"server\":\"127.0.0.1\",\"server_port\":${reality_port}},
+    {\"type\":\"socks\",\"tag\":\"hy2-local\",\"server\":\"127.0.0.1\",\"server_port\":${hy2_port}},
+    {\"type\":\"urltest\",\"tag\":\"auto-out\",\"outbounds\":[\"reality-local\",\"hy2-local\"],\"url\":\"https://www.gstatic.com/generate_204\",\"interval\":\"30s\",\"tolerance\":100,\"interrupt_exist_connections\":true},
+    {\"type\":\"direct\",\"tag\":\"direct\"}
+  ]"
+        final="auto-out"
+    elif [[ "$reality_ok" == "true" ]]; then
+        outbounds="[{\"type\":\"socks\",\"tag\":\"reality-local\",\"server\":\"127.0.0.1\",\"server_port\":${reality_port}},{\"type\":\"direct\",\"tag\":\"direct\"}]"
+        final="reality-local"
+    elif [[ "$hy2_ok" == "true" ]]; then
+        outbounds="[{\"type\":\"socks\",\"tag\":\"hy2-local\",\"server\":\"127.0.0.1\",\"server_port\":${hy2_port}},{\"type\":\"direct\",\"tag\":\"direct\"}]"
+        final="hy2-local"
+    else
+        return 1
+    fi
+
+    vless_write_config "{
+  \"log\":{\"level\":\"warn\"},
+  \"inbounds\":[{\"type\":\"socks\",\"tag\":\"socks-in\",\"listen\":\"0.0.0.0\",\"listen_port\":${public_port}}],
+  \"outbounds\":${outbounds},
+  \"route\":{\"final\":\"${final}\"}
+}"
+    /usr/local/bin/sing-box check -c /etc/sing-box/config.json >/tmp/tunnel-front-check.log 2>&1 || return 1
+    vless_create_service client
+    systemctl restart sing-box-client
+}
+
+wizard_tunnel() {
+    print_banner
+    print_header "Tunnel Setup — Iran ↔ Foreign"
+    echo -e "  ${CYAN}1)${NC}  Foreign server setup ${DIM}(run first)${NC}"
+    echo -e "  ${CYAN}2)${NC}  Iran relay setup     ${DIM}(run second)${NC}"
+    echo -e "  ${CYAN}0)${NC}  Back"
+    menu_prompt
+    case "$MENU_CHOICE" in
+        1) _wizard_tunnel_foreign ;;
+        2) _wizard_tunnel_iran ;;
+        0) return ;;
+        *) print_warn "Invalid choice."; sleep 1 ;;
+    esac
+}
 
 _wizard_tunnel_foreign() {
     print_banner
     print_header "Tunnel — Step 1: Foreign Server Setup"
-    echo -e "  ${DIM}You are on the foreign VPS. This will install the proxy server.${NC}\n"
-
-    # Choose protocol
-    print_header "Which protocol for the tunnel?"
-    echo ""
-    echo -e "  ${CYAN}1)${NC}  ${BOLD}VLESS + Reality${NC}  ${DIM}(TCP — recommended for Iran routes)${NC}"
-    echo -e "  ${CYAN}2)${NC}  ${BOLD}Hysteria2${NC}  ${DIM}(QUIC/UDP — may be filtered on some routes)${NC}"
-    echo -e "  ${CYAN}3)${NC}  ${BOLD}Both${NC}  ${DIM}(recommended — automatic health selection)${NC}"
-    echo ""
+    echo -e "  ${DIM}Reality uses a dedicated Xray-core service. nginx/site/sing-box are not modified.${NC}\n"
+    echo -e "  ${CYAN}1)${NC}  ${BOLD}VLESS + Reality (Xray-core)${NC}  ${DIM}recommended${NC}"
+    echo -e "  ${CYAN}2)${NC}  Hysteria2                 ${DIM}QUIC/UDP${NC}"
+    echo -e "  ${CYAN}3)${NC}  Both"
     menu_prompt
 
-    local proto_vless=false proto_hy2=false
+    local do_xray=false do_hy2=false
     case "$MENU_CHOICE" in
-        1) proto_vless=true ;;
-        2) proto_hy2=true ;;
-        3|"") proto_vless=true; proto_hy2=true ;;
-        *) proto_vless=true ;;
+        1) do_xray=true ;;
+        2) do_hy2=true ;;
+        3|"") do_xray=true; do_hy2=true ;;
+        *) print_error "Invalid choice."; press_enter; return 1 ;;
     esac
 
-    check_internet
+    check_internet || { press_enter; return 1; }
     db_init
+    local server_ip; server_ip=$(get_public_ip)
+    local uuid="" token="" vport="" sni="" sid="" priv="" password=""
 
-    local server_ip handoff_uuid="" handoff_token=""
-    server_ip=$(get_public_ip)
-
-    # ── Install VLESS ────────────────────────────────────────
-    if $proto_vless; then
-        echo ""
-        echo -e "  ${BOLD}─── VLESS + Reality ───────────────────────────────${NC}"
-        fetch_singbox_version stable
-        vless_install_binary "$SINGBOX_VERSION"
-
-        local vport vsni vsid
-        local def_sid
-        def_sid=$(openssl rand -hex 4 2>/dev/null || tr -dc 'a-f0-9' < /dev/urandom | head -c 8)
-        ask vport "  VLESS listen port" "443"
+    if $do_xray; then
+        print_section "Xray VLESS + REALITY"
+        fetch_xray_version
+        xray_install_binary "$XRAY_VERSION" || { press_enter; return 1; }
+        ask vport "  Reality TCP port" "10443"
         while _tunnel_tcp_port_busy "$vport"; do
-            print_warn "TCP port ${vport} is already in use by another service. Existing services will not be modified."
-            ask vport "  Choose another VLESS TCP port" "10443"
+            print_warn "TCP ${vport} is occupied. Existing services will not be touched."
+            ask vport "  Choose another Reality TCP port" "10443"
         done
-        ask vsni  "  Camouflage SNI"    "www.speedtest.net"
-        ask vsid  "  Short ID (hex)"    "$def_sid"
-
-        local kp priv pub uuid sub_token
-        kp=$(generate_keypair)
-        priv=$(echo "$kp" | awk '/PrivateKey/{print $2}')
-        pub=$(echo  "$kp" | awk '/PublicKey/{print $2}')
-        uuid=$(generate_uuid)
-        sub_token=$(generate_token)
-
-        vless_write_config "{
-  \"log\": { \"level\": \"warn\", \"output\": \"/var/log/singbox-manager/sing-box.log\" },
-  \"inbounds\": [{
-    \"type\": \"vless\", \"tag\": \"vless-in\",
-    \"listen\": \"0.0.0.0\", \"listen_port\": ${vport},
-    \"users\": [{\"uuid\": \"${uuid}\", \"flow\": \"xtls-rprx-vision\"}],
-    \"tls\": {
-      \"enabled\": true, \"server_name\": \"${vsni}\",
-      \"reality\": {
-        \"enabled\": true,
-        \"handshake\": {\"server\": \"${vsni}\", \"server_port\": 443},
-        \"private_key\": \"${priv}\",
-        \"short_id\": [\"${vsid}\"]
-      }
-    }
-  }],
-  \"outbounds\": [{\"type\": \"direct\", \"tag\": \"direct\"}]
-}"
-        vless_save_server_info "$pub" "$priv" "$vsid" "$vsni" "$vport" ""
-        vless_create_service server
-        vless_install_quota_enforcer
-        vless_install_traffic_sync
-        open_port "$vport" tcp
-        service_start sing-box || {
-            print_error "Reality server failed to start. Existing services were not modified."
-            journalctl -u sing-box -n 30 --no-pager 2>/dev/null || true
-            press_enter; return 1
-        }
-
-        local init_eng
-        $proto_hy2 \
-            && init_eng='{"vless":true,"hysteria2":true}' \
-            || init_eng='{"vless":true,"hysteria2":false}'
-        if ! db_add_user "$uuid" "tunnel-default" "0" "$sub_token" "$init_eng"; then
-            print_error "Failed to create tunnel credentials in the database."
-            press_enter; return 1
+        ask sni "  REALITY target/SNI" "www.speedtest.net"
+        sid=$(openssl rand -hex 4)
+        uuid=$($XRAY_BIN uuid 2>/dev/null || generate_uuid)
+        local kp
+        kp=$(xray_generate_reality_keypair) || { print_error "Could not generate Xray REALITY keypair."; press_enter; return 1; }
+        priv="${kp%%|*}"; password="${kp#*|}"
+        xray_write_server_config "$vport" "$uuid" "$sni" "$priv" "$sid"
+        if ! xray_check_config "$XRAY_SERVER_CONFIG" >/tmp/xray-server-check.log 2>&1; then
+            print_error "Xray server config validation failed."; cat /tmp/xray-server-check.log; press_enter; return 1
         fi
-        handoff_uuid="$uuid"
-        handoff_token="$sub_token"
-
-        local tunnel_vless_json
-        tunnel_vless_json=$(VPORT="$vport" UUID="$uuid" VSNI="$vsni" PRIV="$priv" \
-            VSID="$vsid" HOST="$server_ip" PUB="$pub" python3 - <<'PYEOF'
-import json, os
-ib = {
-    "type": "vless",
-    "tag": "vless-in",
-    "listen": "0.0.0.0",
-    "listen_port": int(os.environ["VPORT"]),
-    "users": [{"uuid": os.environ["UUID"], "flow": "xtls-rprx-vision"}],
-    "tls": {
-        "enabled": True,
-        "server_name": os.environ["VSNI"],
-        "reality": {
-            "enabled": True,
-            "handshake": {"server": os.environ["VSNI"], "server_port": 443},
-            "private_key": os.environ["PRIV"],
-            "short_id": [os.environ["VSID"]]
-        }
-    },
-    "_meta": {
-        "protocol": "vless_reality",
-        "host": os.environ["HOST"],
-        "port": int(os.environ["VPORT"]),
-        "public_key": os.environ["PUB"],
-        "sni": os.environ["VSNI"],
-        "short_ids": [os.environ["VSID"]]
-    }
-}
-print(json.dumps(ib, separators=(",", ":")))
-PYEOF
-        ) || { print_error "Failed to serialize tunnel Reality inbound."; press_enter; return 1; }
-        _tunnel_upsert_inbound "tunnel-vless-reality" "vless_reality" "$server_ip" "$vport" "$tunnel_vless_json" || {
-            print_error "Failed to register tunnel Reality inbound in database."
-            press_enter; return 1
-        }
+        xray_create_service server
+        open_port "$vport" tcp
+        systemctl restart xray-tunnel-server
+        sleep 2
+        if ! systemctl is-active --quiet xray-tunnel-server; then
+            print_error "xray-tunnel-server failed."; journalctl -u xray-tunnel-server -n 30 --no-pager; press_enter; return 1
+        fi
+        print_success "Xray REALITY tunnel server is running on TCP/${vport}."
     fi
 
-    # ── Install Hysteria2 ────────────────────────────────────
-    if $proto_hy2; then
-        echo ""
-        echo -e "  ${BOLD}─── Hysteria2 ─────────────────────────────────────${NC}"
-        fetch_hysteria2_version
-        hy2_install_binary "$HY2_VERSION"
+    if $do_hy2; then
+        print_section "Hysteria2"
+        fetch_hysteria2_version || { press_enter; return 1; }
+        hy2_install_binary "$HY2_VERSION" || { press_enter; return 1; }
         ensure_packages python3 python3-pip openssl
-        hy2_install_deps
-
-        local hport
+        hy2_install_deps || { press_enter; return 1; }
+        local hport bw rtt quic is ms ic mc up down
         ask hport "  Hysteria2 UDP port" "8443"
-
         probe_server
-        local bw rtt quic up down
         bw=$(estimate_bandwidth); rtt=$(measure_rtt "8.8.8.8")
-        quic=$(hy2_compute_quic_params "$bw" "$rtt")
-        IFS='|' read -r is ms ic mc <<< "$quic"
-        up=$(( bw * 85 / 100 )); down=$(( bw * 85 / 100 ))
-
+        quic=$(hy2_compute_quic_params "$bw" "$rtt"); IFS='|' read -r is ms ic mc <<< "$quic"
+        up=$((bw*85/100)); down=$((bw*85/100))
         hy2_write_config "$hport" "" "$up" "$down" "$is" "$ms" "$ic" "$mc" "60s" "20s"
         hy2_save_server_info "$server_ip" "$hport" "" "True"
-        hy2_write_auth_api
-        hy2_write_sync_script
-        hy2_create_server_service
-        hy2_create_auth_service
-        hy2_install_sync_cron
-        open_port "$hport" both
-        open_port "$HY2_AUTH_PORT" tcp
-        service_start hysteria-server || {
-            print_error "Hysteria2 server failed to start."
-            journalctl -u hysteria-server -n 30 --no-pager 2>/dev/null || true
-            press_enter; return 1
-        }
-        service_start hysteria-auth || {
-            print_error "Hysteria2 auth service failed to start."
-            journalctl -u hysteria-auth -n 30 --no-pager 2>/dev/null || true
-            press_enter; return 1
-        }
-
-        # If no VLESS, create credentials for Hysteria2 only.
-        # In Both mode the VLESS credential above is shared by Hysteria2.
-        if ! $proto_vless; then
-            local h_uuid h_token
-            h_uuid=$(generate_uuid)
-            h_token=$(generate_token)
-            if ! db_add_user "$h_uuid" "tunnel-default" "0" "$h_token" '{"vless":false,"hysteria2":true}'; then
-                print_error "Failed to create Hysteria2 tunnel credentials in the database."
-                press_enter; return 1
-            fi
-            handoff_uuid="$h_uuid"
-            handoff_token="$h_token"
+        hy2_write_auth_api; hy2_write_sync_script; hy2_create_server_service; hy2_create_auth_service; hy2_install_sync_cron
+        open_port "$hport" udp
+        systemctl restart hysteria-auth hysteria-server
+        sleep 2
+        if ! systemctl is-active --quiet hysteria-server || ! systemctl is-active --quiet hysteria-auth; then
+            print_error "Hysteria2 services failed."; press_enter; return 1
         fi
-
-        local tunnel_hy2_json
-        tunnel_hy2_json=$(HY2_PORT="$hport" HY2_IP="$server_ip" python3 - <<'PYEOF'
-import json, os
-print(json.dumps({"_meta": {
-    "port": int(os.environ["HY2_PORT"]),
-    "domain": "",
-    "ip": os.environ["HY2_IP"],
-    "selfcert": True,
-    "hop_range": ""
-}}, separators=(",", ":")))
-PYEOF
-        ) || { print_error "Failed to serialize tunnel Hysteria2 inbound."; press_enter; return 1; }
-        _tunnel_upsert_inbound "tunnel-hysteria2" "hysteria2" "$server_ip" "$hport" "$tunnel_hy2_json" || {
-            print_error "Failed to register tunnel Hysteria2 inbound in database."
-            press_enter; return 1
-        }
+        if [[ -z "$uuid" ]]; then uuid=$(generate_uuid); fi
+        token=$(generate_token)
+        db_add_user "$uuid" "tunnel-default" "0" "$token" '{"vless":false,"hysteria2":true}' >/dev/null 2>&1 || true
+        print_success "Hysteria2 server is running on UDP/${hport}."
     fi
 
-    # ── Print handoff card ───────────────────────────────────
     echo ""
-    echo -e "  ${GREEN}${BOLD}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "  ${GREEN}${BOLD}║  FOREIGN SERVER READY — Copy this info to Iran server    ║${NC}"
-    echo -e "  ${GREEN}${BOLD}╚══════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "  ${YELLOW}${BOLD}→ Save this information — you need it in Step 2 (Iran server)${NC}"
-    echo ""
-    echo -e "  Foreign server IP : ${CYAN}${BOLD}${server_ip}${NC}"
-    echo ""
-
-    if $proto_vless && vless_read_server_info 2>/dev/null; then
-        echo -e "  ${BOLD}── VLESS + Reality ──────────────────────────${NC}"
-        echo -e "  Port      : ${CYAN}${VINFO_PORT}${NC}"
-        echo -e "  UUID      : ${CYAN}${uuid}${NC}"
-        echo -e "  PublicKey : ${CYAN}${VINFO_PUBKEY}${NC}"
-        echo -e "  ShortID   : ${CYAN}${VINFO_SID}${NC}"
-        echo -e "  SNI       : ${CYAN}${VINFO_SNI}${NC}"
-        echo ""
+    echo -e "  ${GREEN}${BOLD}FOREIGN SERVER READY${NC}"
+    echo -e "  Foreign IP : ${CYAN}${server_ip}${NC}"
+    if $do_xray; then
+        echo -e "\n  ${BOLD}Xray VLESS + Reality${NC}"
+        echo -e "  Port       : ${CYAN}${vport}/TCP${NC}"
+        echo -e "  UUID       : ${CYAN}${uuid}${NC}"
+        echo -e "  Password/PublicKey : ${CYAN}${password}${NC}"
+        echo -e "  Short ID   : ${CYAN}${sid}${NC}"
+        echo -e "  SNI        : ${CYAN}${sni}${NC}"
     fi
-
-    if $proto_hy2 && hy2_read_server_info 2>/dev/null; then
-        # Use credentials captured at creation time. Fall back to the DB for
-        # interrupted/legacy runs; avoid JSON shell parsing entirely.
-        if [[ -z "$handoff_uuid" || -z "$handoff_token" ]]; then
-            local db_creds
-            db_creds=$(DB_PATH="$DB_PATH" python3 - <<'PYEOF'
-import sqlite3, os
-conn = sqlite3.connect(os.environ["DB_PATH"])
-row = conn.execute(
-    "SELECT uuid, sub_token FROM users WHERE label='tunnel-default' ORDER BY id DESC LIMIT 1"
-).fetchone()
-if row:
-    print(row[0] + "\t" + row[1])
-conn.close()
-PYEOF
+    if $do_hy2; then
+        [[ -n "$token" ]] || token=$(DB_PATH="$DB_PATH" UUID="$uuid" python3 - <<'PY'
+import os, sqlite3
+c=sqlite3.connect(os.environ['DB_PATH']); r=c.execute('select sub_token from users where uuid=? order by id desc limit 1',(os.environ['UUID'],)).fetchone(); print(r[0] if r else '')
+PY
 )
-            if [[ "$db_creds" == *$'\t'* ]]; then
-                handoff_uuid="${db_creds%%$'\t'*}"
-                handoff_token="${db_creds#*$'\t'}"
-            fi
-        fi
-
-        if [[ -z "$handoff_uuid" || -z "$handoff_token" ]]; then
-            print_error "Tunnel credentials could not be loaded; refusing to print an unusable handoff card."
-            press_enter; return 1
-        fi
-
-        echo -e "  ${BOLD}── Hysteria2 ────────────────────────────────${NC}"
-        echo -e "  Port      : ${CYAN}${HINFO_PORT}/UDP${NC}"
-        echo -e "  UUID      : ${CYAN}${handoff_uuid}${NC}"
-        echo -e "  Token     : ${CYAN}${handoff_token}${NC}"
-        echo -e "  TLS       : ${YELLOW}self-signed (set insecure=true on client)${NC}"
-        echo ""
+        echo -e "\n  ${BOLD}Hysteria2${NC}"
+        echo -e "  Port       : ${CYAN}${hport}/UDP${NC}"
+        echo -e "  UUID       : ${CYAN}${uuid}${NC}"
+        echo -e "  Token      : ${CYAN}${token}${NC}"
     fi
-
-    echo -e "  ${DIM}Now go to your IRAN server and run this script again.${NC}"
-    echo -e "  ${DIM}Choose: Tunnel → I'm on the IRAN server.${NC}"
     echo ""
     press_enter
 }
 
-# ══════════════════════════════════════════════════════════════
-#  Iran server — installs relay client pointing to foreign server
-# ══════════════════════════════════════════════════════════════
-
 _wizard_tunnel_iran() {
     print_banner
     print_header "Tunnel — Step 2: Iran Relay Server Setup"
-    echo -e "  ${DIM}You are on the Iran-side VPS. Enter the foreign server details.${NC}\n"
-    echo -e "  ${YELLOW}You need the information printed by Step 1 (foreign server).${NC}\n"
-
-    print_header "Which protocol did you install on the foreign server?"
-    echo ""
-    echo -e "  ${CYAN}1)${NC}  VLESS + Reality"
+    echo -e "  ${CYAN}1)${NC}  VLESS + Reality (Xray-core)"
     echo -e "  ${CYAN}2)${NC}  Hysteria2"
     echo -e "  ${CYAN}3)${NC}  Both"
     menu_prompt
-
-    local relay_vless=false relay_hy2=false
+    local use_xray=false use_hy2=false
     case "$MENU_CHOICE" in
-        1) relay_vless=true ;;
-        2) relay_hy2=true ;;
-        3|"") relay_vless=true; relay_hy2=true ;;
+        1) use_xray=true ;;
+        2) use_hy2=true ;;
+        3|"") use_xray=true; use_hy2=true ;;
+        *) print_error "Invalid choice."; press_enter; return 1 ;;
     esac
 
-    check_internet
-    fetch_singbox_version stable
-
-    # ── Collect foreign server details ───────────────────────
-    local foreign_ip
+    check_internet || { press_enter; return 1; }
+    local foreign_ip public_socks
     ask foreign_ip "  Foreign server IP" ""
-    [[ -z "$foreign_ip" ]] && { print_error "Foreign server IP required."; press_enter; return; }
+    [[ -n "$foreign_ip" ]] || { print_error "Foreign IP is required."; press_enter; return 1; }
+    ask public_socks "  Public/local SOCKS5 port on Iran server" "10808"
 
-    # ── Build outbounds based on selected protocols ──────────
-    local outbounds_json socks_port
-    ask socks_port "  Local SOCKS5 port (for routing on Iran server)" "10808"
-
-    if $relay_vless && $relay_hy2; then
-        # Collect both sets of credentials
-        local v_port v_uuid v_pubkey v_sid v_sni
-        echo -e "\n  ${BOLD}VLESS details:${NC}"
-        ask v_port   "  VLESS port"    "443"
-        ask v_uuid   "  VLESS UUID"    ""
-        ask v_pubkey "  PublicKey"     ""
-        ask v_sid    "  Short ID"      ""
-        ask v_sni    "  SNI"           "www.speedtest.net"
-
-        local h_port h_uuid h_token
-        echo -e "\n  ${BOLD}Hysteria2 details:${NC}"
-        ask h_port  "  Hysteria2 UDP port" "8443"
-        ask h_uuid  "  UUID"               ""
-        ask h_token "  Token (password)"   ""
-
-        outbounds_json="[
-    {
-      \"type\": \"vless\", \"tag\": \"vless-out\",
-      \"server\": \"${foreign_ip}\", \"server_port\": ${v_port},
-      \"uuid\": \"${v_uuid}\", \"flow\": \"xtls-rprx-vision\",
-      \"tls\": {
-        \"enabled\": true, \"server_name\": \"${v_sni}\",
-        \"utls\": {\"enabled\": true, \"fingerprint\": \"chrome\"},
-        \"reality\": {\"enabled\": true, \"public_key\": \"${v_pubkey}\", \"short_id\": \"${v_sid}\"}
-      }
-    },
-    {
-      \"type\": \"hysteria2\", \"tag\": \"hy2-out\",
-      \"server\": \"${foreign_ip}\", \"server_port\": ${h_port},
-      \"password\": \"${h_uuid}:${h_token}\",
-      \"tls\": {\"enabled\": true, \"insecure\": true}
-    },
-    {
-      \"type\": \"urltest\", \"tag\": \"auto-out\",
-      \"outbounds\": [\"vless-out\", \"hy2-out\"],
-      \"url\": \"https://www.gstatic.com/generate_204\",
-      \"interval\": \"1m\", \"tolerance\": 100,
-      \"idle_timeout\": \"10m\", \"interrupt_exist_connections\": true
-    },
-    {\"type\": \"direct\", \"tag\": \"direct\"}
-  ]"
-
-    elif $relay_vless; then
-        local v_port v_uuid v_pubkey v_sid v_sni
-        echo -e "\n  ${BOLD}VLESS details:${NC}"
-        ask v_port   "  VLESS port" "443"
-        ask v_uuid   "  UUID"       ""
-        ask v_pubkey "  PublicKey"  ""
-        ask v_sid    "  Short ID"   ""
-        ask v_sni    "  SNI"        "www.speedtest.net"
-
-        outbounds_json="[
-    {
-      \"type\": \"vless\", \"tag\": \"vless-out\",
-      \"server\": \"${foreign_ip}\", \"server_port\": ${v_port},
-      \"uuid\": \"${v_uuid}\", \"flow\": \"xtls-rprx-vision\",
-      \"tls\": {
-        \"enabled\": true, \"server_name\": \"${v_sni}\",
-        \"utls\": {\"enabled\": true, \"fingerprint\": \"chrome\"},
-        \"reality\": {\"enabled\": true, \"public_key\": \"${v_pubkey}\", \"short_id\": \"${v_sid}\"}
-      }
-    },
-    {\"type\": \"direct\", \"tag\": \"direct\"}
-  ]"
-
-    else  # Hysteria2 only
-        local h_port h_uuid h_token
-        ask h_port  "  Hysteria2 UDP port" "8443"
-        ask h_uuid  "  UUID"               ""
-        ask h_token "  Token"              ""
-
-        outbounds_json="[
-    {
-      \"type\": \"hysteria2\", \"tag\": \"hy2-out\",
-      \"server\": \"${foreign_ip}\", \"server_port\": ${h_port},
-      \"password\": \"${h_uuid}:${h_token}\",
-      \"tls\": {\"enabled\": true, \"insecure\": true}
-    },
-    {\"type\": \"direct\", \"tag\": \"direct\"}
-  ]"
+    local xport xuuid xpassword xsid xsni hport huuid htoken
+    if $use_xray; then
+        print_section "Xray REALITY details"
+        ask xport "  Reality TCP port" "10443"
+        ask xuuid "  UUID" ""
+        ask xpassword "  Password/PublicKey" ""
+        ask xsid "  Short ID" ""
+        ask xsni "  SNI" "www.speedtest.net"
+    fi
+    if $use_hy2; then
+        print_section "Hysteria2 details"
+        ask hport "  Hysteria2 UDP port" "8443"
+        ask huuid "  UUID" "${xuuid:-}"
+        ask htoken "  Token" ""
     fi
 
-    # ── Determine final tag for routing ──────────────────────
-    local final_tag
-    if $relay_vless && $relay_hy2; then
-        final_tag="auto-out"
-    elif $relay_vless; then
-        final_tag="vless-out"
-    else
-        final_tag="hy2-out"
-    fi
+    local x_internal="$public_socks" h_internal="$public_socks"
+    if $use_xray && $use_hy2; then x_internal=$((public_socks+2)); h_internal=$((public_socks+3)); fi
+    local reality_ok=false hy2_ok=false reality_ip="" hy2_ip=""
 
-    # ── Install binary and write client config ───────────────
-    print_step 1 2 "Installing sing-box binary"
-    vless_install_binary "$SINGBOX_VERSION" || { press_enter; return; }
-
-    print_step 2 2 "Writing relay client configuration"
-    vless_write_config "{
-  \"log\": { \"level\": \"warn\" },
-  \"inbounds\": [{
-    \"type\": \"socks\", \"tag\": \"socks-in\",
-    \"listen\": \"0.0.0.0\", \"listen_port\": ${socks_port}
-  }],
-  \"outbounds\": ${outbounds_json},
-  \"route\": {\"final\": \"${final_tag}\"}
-}"
-
-    # Validate the generated configuration before touching the service.
-    if ! /usr/local/bin/sing-box check -c /etc/sing-box/config.json >/tmp/singbox-tunnel-check.log 2>&1; then
-        print_error "Generated tunnel configuration is invalid."
-        cat /tmp/singbox-tunnel-check.log
-        press_enter
-        return 1
-    fi
-
-    vless_create_service client
-    service_start sing-box-client || { press_enter; return 1; }
-
-    # ── Test connectivity ────────────────────────────────────
-    print_info "Testing tunnel (25s timeout)..."
-    sleep 3
-    local exit_ip
-    exit_ip=$(curl -fsS --max-time 25 --connect-timeout 12 \
-              --socks5-hostname "127.0.0.1:${socks_port}" \
-              https://ifconfig.me 2>/tmp/singbox-tunnel-curl.err | tr -d '[:space:]' || true)
-    [[ "$exit_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$exit_ip" =~ ^[0-9a-fA-F:]+$ ]] || exit_ip=""
-
-    echo ""
-    if [[ -n "$exit_ip" ]]; then
-        print_success "Tunnel is working! Exit IP: ${exit_ip}"
-        if $relay_vless && $relay_hy2; then
-            print_success "Automatic path selection is enabled (Reality + Hysteria2)."
-        fi
-    else
-        print_error "Tunnel connectivity test FAILED. Configuration will NOT be reported as ready."
-        echo -e "  ${DIM}curl error:${NC}"
-        sed 's/^/    /' /tmp/singbox-tunnel-curl.err 2>/dev/null || true
-        echo -e "  ${DIM}Recent sing-box-client log:${NC}"
-        journalctl -u sing-box-client -n 20 --no-pager 2>/dev/null | sed 's/^/    /' || true
-        echo ""
-        if $relay_hy2 && ! $relay_vless; then
-            print_warn "Hysteria2/QUIC is not usable on this route. Re-run Tunnel Step 2 with VLESS + Reality or Both."
-        elif $relay_vless && $relay_hy2; then
-            print_warn "Neither configured path produced working egress. Verify the Reality credentials/port first."
+    if $use_xray; then
+        print_section "Installing Xray Reality client"
+        fetch_xray_version
+        xray_install_binary "$XRAY_VERSION" || { press_enter; return 1; }
+        local xlisten="0.0.0.0"; $use_hy2 && xlisten="127.0.0.1"
+        xray_write_client_config "$foreign_ip" "$xport" "$xuuid" "$xsni" "$xpassword" "$xsid" "$xlisten" "$x_internal"
+        if ! xray_check_config "$XRAY_CLIENT_CONFIG" >/tmp/xray-client-check.log 2>&1; then
+            print_error "Xray client config validation failed."; cat /tmp/xray-client-check.log
         else
-            print_warn "Reality connection failed. Verify IP, port, UUID, PublicKey, ShortID and SNI."
+            xray_create_service client
+            systemctl restart xray-tunnel-client
+            sleep 2
+            if systemctl is-active --quiet xray-tunnel-client; then
+                reality_ip=$(_tunnel_test_socks "$x_internal" 20 || true)
+                if [[ -n "$reality_ip" ]]; then reality_ok=true; print_success "Reality path works. Exit IP: ${reality_ip}";
+                else print_warn "Reality path did not produce egress."; tail -30 /var/log/xray-tunnel/client-error.log 2>/dev/null || true; fi
+            else
+                print_warn "xray-tunnel-client is not running."; journalctl -u xray-tunnel-client -n 30 --no-pager || true
+            fi
         fi
-        echo ""
-        press_enter
-        return 1
     fi
 
+    if $use_hy2; then
+        print_section "Installing Hysteria2 client"
+        fetch_hysteria2_version
+        hy2_install_binary "$HY2_VERSION" || true
+        local hlisten="0.0.0.0"; $use_xray && hlisten="127.0.0.1"
+        if _tunnel_hy2_client_service "$foreign_ip" "$hport" "$huuid" "$htoken" "$hlisten" "$h_internal"; then
+            sleep 2
+            hy2_ip=$(_tunnel_test_socks "$h_internal" 15 || true)
+            if [[ -n "$hy2_ip" ]]; then hy2_ok=true; print_success "Hysteria2 path works. Exit IP: ${hy2_ip}";
+            else print_warn "Hysteria2 path failed health test (QUIC may be filtered)."; fi
+        fi
+    fi
+
+    if $use_xray && $use_hy2; then
+        print_section "Building automatic local failover"
+        fetch_singbox_version stable
+        vless_install_binary "$SINGBOX_VERSION" || { press_enter; return 1; }
+        if ! _tunnel_frontend_write "$public_socks" "$x_internal" "$h_internal" "$reality_ok" "$hy2_ok"; then
+            print_error "No healthy tunnel path is available; frontend was not activated."
+            press_enter; return 1
+        fi
+        sleep 2
+    elif $use_xray && [[ "$reality_ok" != "true" ]]; then
+        print_error "Reality tunnel failed verification."; press_enter; return 1
+    elif $use_hy2 && [[ "$hy2_ok" != "true" ]]; then
+        print_error "Hysteria2 tunnel failed verification."; press_enter; return 1
+    fi
+
+    local final_ip; final_ip=$(_tunnel_test_socks "$public_socks" 20 || true)
+    if [[ -z "$final_ip" ]]; then
+        print_error "Final tunnel verification failed."
+        press_enter; return 1
+    fi
     echo ""
-    echo -e "  ${GREEN}${BOLD}Iran relay configured and verified.${NC}"
-    echo -e "  Local SOCKS5 : ${CYAN}127.0.0.1:${socks_port}${NC}"
-    echo -e "  Foreign IP   : ${CYAN}${foreign_ip}${NC}"
-    echo -e "  Active route : ${CYAN}${final_tag}${NC}"
-    echo ""
-    echo -e "  ${DIM}Point your clients to the IRAN server.${NC}"
-    echo -e "  ${DIM}Go to the FOREIGN server's manager to add/manage users.${NC}"
+    print_success "IRAN RELAY VERIFIED — Exit IP: ${final_ip}"
+    echo -e "  SOCKS5 : ${CYAN}0.0.0.0:${public_socks}${NC}"
+    if $use_xray && $use_hy2; then
+        $reality_ok && echo -e "  Reality : ${GREEN}healthy${NC}" || echo -e "  Reality : ${RED}failed${NC}"
+        $hy2_ok && echo -e "  Hysteria2: ${GREEN}healthy${NC}" || echo -e "  Hysteria2: ${YELLOW}unavailable${NC}"
+    fi
     echo ""
     press_enter
 }

@@ -16,12 +16,12 @@ DB_DIR="/etc/singbox-manager/data"
 # ── Bootstrap ─────────────────────────────────────────────────
 
 db_init() {
-    inbound_db_init 2>/dev/null || true
     mkdir -p "$DB_DIR"
-    python3 - <<'PYEOF'
+    inbound_db_init 2>/dev/null || true
+    DB_PATH="$DB_PATH" python3 - <<'PYEOF'
 import sqlite3, sys, os
 
-db_path = os.environ.get("DB_PATH", "/etc/singbox-manager/data/users.db")
+db_path = os.environ["DB_PATH"]
 
 conn = sqlite3.connect(db_path)
 conn.executescript("""

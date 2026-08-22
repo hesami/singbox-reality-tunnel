@@ -47,6 +47,32 @@ wizard_tunnel() {
     esac
 }
 
+# Persist tunnel-created inbounds in the same DB used by User Management
+# and the unified subscription API. Re-running updates the same record.
+_tunnel_upsert_inbound() {
+    local tag="$1" proto="$2" domain="$3" port="$4" cfg="$5"
+    TAG="$tag" PROTO="$proto" DOMAIN="$domain" PORT="$port" CFG="$cfg" \
+    DB_PATH="$DB_PATH" python3 - <<'PYEOF'
+import sqlite3, os
+conn = sqlite3.connect(os.environ["DB_PATH"])
+conn.execute("""
+INSERT INTO inbounds (tag, protocol, domain, port, enabled, config_json)
+VALUES (?, ?, ?, ?, 1, ?)
+ON CONFLICT(tag) DO UPDATE SET
+    protocol=excluded.protocol,
+    domain=excluded.domain,
+    port=excluded.port,
+    enabled=1,
+    config_json=excluded.config_json
+""", (
+    os.environ["TAG"], os.environ["PROTO"], os.environ["DOMAIN"],
+    int(os.environ["PORT"]), os.environ["CFG"]
+))
+conn.commit()
+conn.close()
+PYEOF
+}
+
 # ══════════════════════════════════════════════════════════════
 #  Foreign server — installs proxy, prints settings for Iran side
 # ══════════════════════════════════════════════════════════════
@@ -76,7 +102,7 @@ _wizard_tunnel_foreign() {
     check_internet
     db_init
 
-    local server_ip
+    local server_ip handoff_uuid="" handoff_token=""
     server_ip=$(get_public_ip)
 
     # ── Install VLESS ────────────────────────────────────────
@@ -129,7 +155,49 @@ _wizard_tunnel_foreign() {
         $proto_hy2 \
             && init_eng='{"vless":true,"hysteria2":true}' \
             || init_eng='{"vless":true,"hysteria2":false}'
-        db_add_user "$uuid" "tunnel-default" "0" "$sub_token" "$init_eng"
+        if ! db_add_user "$uuid" "tunnel-default" "0" "$sub_token" "$init_eng"; then
+            print_error "Failed to create tunnel credentials in the database."
+            press_enter; return 1
+        fi
+        handoff_uuid="$uuid"
+        handoff_token="$sub_token"
+
+        local tunnel_vless_json
+        tunnel_vless_json=$(VPORT="$vport" UUID="$uuid" VSNI="$vsni" PRIV="$priv" \
+            VSID="$vsid" HOST="$server_ip" PUB="$pub" python3 - <<'PYEOF'
+import json, os
+ib = {
+    "type": "vless",
+    "tag": "vless-in",
+    "listen": "0.0.0.0",
+    "listen_port": int(os.environ["VPORT"]),
+    "users": [{"uuid": os.environ["UUID"], "flow": "xtls-rprx-vision"}],
+    "tls": {
+        "enabled": True,
+        "server_name": os.environ["VSNI"],
+        "reality": {
+            "enabled": True,
+            "handshake": {"server": os.environ["VSNI"], "server_port": 443},
+            "private_key": os.environ["PRIV"],
+            "short_id": [os.environ["VSID"]]
+        }
+    },
+    "_meta": {
+        "protocol": "vless_reality",
+        "host": os.environ["HOST"],
+        "port": int(os.environ["VPORT"]),
+        "public_key": os.environ["PUB"],
+        "sni": os.environ["VSNI"],
+        "short_ids": [os.environ["VSID"]]
+    }
+}
+print(json.dumps(ib, separators=(",", ":")))
+PYEOF
+        ) || { print_error "Failed to serialize tunnel Reality inbound."; press_enter; return 1; }
+        _tunnel_upsert_inbound "tunnel-vless-reality" "vless_reality" "$server_ip" "$vport" "$tunnel_vless_json" || {
+            print_error "Failed to register tunnel Reality inbound in database."
+            press_enter; return 1
+        }
     fi
 
     # ── Install Hysteria2 ────────────────────────────────────
@@ -163,12 +231,36 @@ _wizard_tunnel_foreign() {
         service_start hysteria-server
         service_start hysteria-auth
 
-        # If no VLESS, create user for hysteria2 only
+        # If no VLESS, create credentials for Hysteria2 only.
+        # In Both mode the VLESS credential above is shared by Hysteria2.
         if ! $proto_vless; then
             local h_uuid h_token
-            h_uuid=$(generate_uuid); h_token=$(generate_token)
-            db_add_user "$h_uuid" "tunnel-default" "0" "$h_token" '{"vless":false,"hysteria2":true}'
+            h_uuid=$(generate_uuid)
+            h_token=$(generate_token)
+            if ! db_add_user "$h_uuid" "tunnel-default" "0" "$h_token" '{"vless":false,"hysteria2":true}'; then
+                print_error "Failed to create Hysteria2 tunnel credentials in the database."
+                press_enter; return 1
+            fi
+            handoff_uuid="$h_uuid"
+            handoff_token="$h_token"
         fi
+
+        local tunnel_hy2_json
+        tunnel_hy2_json=$(HY2_PORT="$hport" HY2_IP="$server_ip" python3 - <<'PYEOF'
+import json, os
+print(json.dumps({"_meta": {
+    "port": int(os.environ["HY2_PORT"]),
+    "domain": "",
+    "ip": os.environ["HY2_IP"],
+    "selfcert": True,
+    "hop_range": ""
+}}, separators=(",", ":")))
+PYEOF
+        ) || { print_error "Failed to serialize tunnel Hysteria2 inbound."; press_enter; return 1; }
+        _tunnel_upsert_inbound "tunnel-hysteria2" "hysteria2" "$server_ip" "$hport" "$tunnel_hy2_json" || {
+            print_error "Failed to register tunnel Hysteria2 inbound in database."
+            press_enter; return 1
+        }
     fi
 
     # ── Print handoff card ───────────────────────────────────
@@ -193,23 +285,36 @@ _wizard_tunnel_foreign() {
     fi
 
     if $proto_hy2 && hy2_read_server_info 2>/dev/null; then
-        local h_uuid_show h_token_show
-        h_uuid_show=$(DB_PATH="$DB_PATH" python3 - <<'PYEOF'
-import sqlite3, json, os
+        # Use credentials captured at creation time. Fall back to the DB for
+        # interrupted/legacy runs; avoid JSON shell parsing entirely.
+        if [[ -z "$handoff_uuid" || -z "$handoff_token" ]]; then
+            local db_creds
+            db_creds=$(DB_PATH="$DB_PATH" python3 - <<'PYEOF'
+import sqlite3, os
 conn = sqlite3.connect(os.environ["DB_PATH"])
-row  = conn.execute("SELECT uuid, sub_token FROM users ORDER BY created_at DESC LIMIT 1").fetchone()
-if row: print(json.dumps({"uuid": row[0], "token": row[1]}))
+row = conn.execute(
+    "SELECT uuid, sub_token FROM users WHERE label='tunnel-default' ORDER BY id DESC LIMIT 1"
+).fetchone()
+if row:
+    print(row[0] + "\t" + row[1])
 conn.close()
 PYEOF
 )
-        local hy2_uuid_disp hy2_token_disp
-        hy2_uuid_disp=$(echo "$h_uuid_show" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('uuid',''))" 2>/dev/null || echo "")
-        hy2_token_disp=$(echo "$h_uuid_show"| python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('token',''))"2>/dev/null || echo "")
+            if [[ "$db_creds" == *$'\t'* ]]; then
+                handoff_uuid="${db_creds%%$'\t'*}"
+                handoff_token="${db_creds#*$'\t'}"
+            fi
+        fi
+
+        if [[ -z "$handoff_uuid" || -z "$handoff_token" ]]; then
+            print_error "Tunnel credentials could not be loaded; refusing to print an unusable handoff card."
+            press_enter; return 1
+        fi
 
         echo -e "  ${BOLD}── Hysteria2 ────────────────────────────────${NC}"
         echo -e "  Port      : ${CYAN}${HINFO_PORT}/UDP${NC}"
-        echo -e "  UUID      : ${CYAN}${hy2_uuid_disp}${NC}"
-        echo -e "  Token     : ${CYAN}${hy2_token_disp}${NC}"
+        echo -e "  UUID      : ${CYAN}${handoff_uuid}${NC}"
+        echo -e "  Token     : ${CYAN}${handoff_token}${NC}"
         echo -e "  TLS       : ${YELLOW}self-signed (set insecure=true on client)${NC}"
         echo ""
     fi

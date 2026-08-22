@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Customer Gateway: VLESS+Reality on Iran -> local reverse-SSH SOCKS -> Turkey.
+# Customer Gateway v3.0.15: VLESS+Reality on Iran -> local reverse-SSH SOCKS -> Turkey.
 # Does not modify nginx, websites, or ports 80/443.
 
 CGW_DIR="/etc/customer-gateway"
@@ -105,12 +105,33 @@ new=json.dumps(config,indent=2,sort_keys=True)+'\n'
 try: old=open(CFG).read()
 except: old=''
 if old==new and '--force' not in sys.argv: sys.exit(0)
-tmp=CFG+'.tmp'; open(tmp,'w').write(new); os.chmod(tmp,0o600)
+tmp=CFG+'.new.json'
+with open(tmp,'w') as f:
+    f.write(new)
+os.chmod(tmp,0o600)
 r=subprocess.run([XRAY,'run','-test','-config',tmp],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
 if r.returncode!=0:
-    print(r.stdout,file=sys.stderr); os.unlink(tmp); sys.exit(1)
+    print(r.stdout,file=sys.stderr)
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
+    sys.exit(1)
+# Keep the previous validated config so a failed restart can be rolled back.
+had_old=os.path.exists(CFG)
+backup=old if had_old else None
 os.replace(tmp,CFG)
-subprocess.run(['systemctl','restart',SERVICE],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+r=subprocess.run(['systemctl','restart',SERVICE],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+active=subprocess.run(['systemctl','is-active','--quiet',SERVICE]).returncode==0
+if r.returncode!=0 or not active:
+    msg=(r.stdout or '').strip()
+    if msg: print(msg,file=sys.stderr)
+    if backup is not None:
+        with open(CFG,'w') as f: f.write(backup)
+        os.chmod(CFG,0o600)
+        subprocess.run(['systemctl','restart',SERVICE],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    else:
+        try: os.unlink(CFG)
+        except FileNotFoundError: pass
+    sys.exit(1)
 PY
     chmod 755 "$CGW_REBUILD"
 }

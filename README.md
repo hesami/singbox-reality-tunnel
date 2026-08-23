@@ -1,4 +1,4 @@
-# Iran ↔ Foreign Gateway Manager — v4.3.1 Domain-First Production
+# Iran ↔ Foreign Gateway Manager — v4.3.2 Domain-First Production
 
 This is the minimal production branch for the verified architecture:
 
@@ -6,7 +6,7 @@ This is the minimal production branch for the verified architecture:
 
 It intentionally keeps only the working production path: Reverse SSH, Customer Gateway, users/quota/expiry, subscriptions, HTTPS, health/security checks, backup/restore, and performance hardening.
 
-## v4.3.1: production hardening
+## v4.3.2: production hardening
 
 - Fixed custom reverse-SOCKS ports: health checks, watchdog, gateway routing, diagnostics and status now use the paired port instead of assuming `10808`.
 - Added strict host/IPv4/port validation to prevent malformed or unsafe service configuration.

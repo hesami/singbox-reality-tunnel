@@ -572,14 +572,23 @@ cfg={
  'outbounds':[
   {
    'tag':'proxy','protocol':'vless',
-   'settings':{'address':os.environ['HOST'],'port':int(os.environ['PORT']),'id':os.environ['UUID'],'encryption':'none'},
-   'streamSettings':{'method':'raw','security':'reality','realitySettings':{
-      'serverName':os.environ['SNI'],'fingerprint':'chrome','password':os.environ['PUB'],'shortId':os.environ['SID'],'spiderX':'/'
-   }},
-   'proxySettings':{'tag':'foreign-hop','transportLayer':False},
+   'settings':{'vnext':[{'address':os.environ['HOST'],'port':int(os.environ['PORT']),'users':[{'id':os.environ['UUID'],'encryption':'none'}]}]},
+   'streamSettings':{
+      'network':'tcp',
+      'security':'reality',
+      'realitySettings':{
+        'serverName':os.environ['SNI'],
+        'fingerprint':'chrome',
+        'publicKey':os.environ['PUB'],
+        'password':os.environ['PUB'],
+        'shortId':os.environ['SID'],
+        'spiderX':'/'
+      },
+      'sockopt':{'dialerProxy':'foreign-hop'}
+   },
    'targetStrategy':'UseIPv4'
   },
-  {'tag':'foreign-hop','protocol':'socks','settings':{'address':'127.0.0.1','port':int(os.environ['EXITPORT'])}}
+  {'tag':'foreign-hop','protocol':'socks','settings':{'servers':[{'address':'127.0.0.1','port':int(os.environ['EXITPORT'])}]}}
  ]
 }
 with open(sys.argv[1],'w') as f: json.dump(cfg,f)

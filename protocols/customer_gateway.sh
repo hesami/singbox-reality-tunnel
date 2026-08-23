@@ -297,8 +297,28 @@ WantedBy=multi-user.target
 UNIT
 cat >/etc/customer-gateway/watchdog.sh <<'SH'
 #!/usr/bin/env bash
-f=/run/customer-gateway-watchdog.fail;n=0;[[ -f "$f" ]]&&n=$(cat "$f" 2>/dev/null||echo 0)
-if curl -fsS --connect-timeout 4 --max-time 10 --socks5-hostname 127.0.0.1:10808 https://api.ipify.org >/dev/null 2>&1;then echo 0>"$f";systemctl is-active --quiet customer-gateway.service||systemctl start customer-gateway.service >/dev/null 2>&1||true;else n=$((n+1));echo "$n">"$f";((n>=3))&&systemctl stop customer-gateway.service >/dev/null 2>&1||true;fi
+# Conservative kill-switch: use a fixed, highly available endpoint and require
+# repeated consecutive failures before stopping the customer gateway.
+f=/run/customer-gateway-watchdog.fail
+n=0
+[[ -f "$f" ]] && n=$(cat "$f" 2>/dev/null || echo 0)
+probe(){
+  local body ip i
+  for i in 1 2; do
+    body=$(curl -4kfsS --connect-timeout 3 --max-time 6 --socks5 127.0.0.1:10808 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+    ip=$(printf '%s\n' "$body" | awk -F= '$1=="ip"{print $2;exit}' | tr -d '[:space:]')
+    [[ -n "$ip" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+if probe; then
+  echo 0 >"$f"
+  systemctl is-active --quiet customer-gateway.service || systemctl start customer-gateway.service >/dev/null 2>&1 || true
+else
+  n=$((n+1)); echo "$n" >"$f"
+  (( n >= 5 )) && systemctl stop customer-gateway.service >/dev/null 2>&1 || true
+fi
 SH
 chmod 755 /etc/customer-gateway/watchdog.sh
 cat >/etc/systemd/system/customer-gateway-watchdog.service <<'UNIT'
@@ -449,7 +469,9 @@ PY
         sleep 0.4
         ss -H -ltn 2>/dev/null | awk -v p=":$test_port" '$4 ~ p"$"{f=1}END{exit !f}' && break
     done
-    out=$(curl -fsS --connect-timeout 5 --max-time 15 --socks5-hostname "127.0.0.1:${test_port}" https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+    local trace
+    trace=$(curl -4kfsS --connect-timeout 5 --max-time 15 --socks5 "127.0.0.1:${test_port}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+    out=$(printf '%s\n' "$trace" | awk -F= '$1=="ip"{print $2;exit}' | tr -d '[:space:]')
     kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true
     if [[ -n "$out" && "$out" == "$expected" ]]; then rm -f "$tmp" "$log"; echo "$out"; return 0; fi
     echo "LOCAL_REALITY_FAILED expected=${expected:-?} got=${out:-none}"

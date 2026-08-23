@@ -1,4 +1,13 @@
-# v4.0.3 — Client Endpoint Separation + Deeper REALITY Diagnostics
+# v4.0.4 — Stable Tunnel Health Checks
+
+- Replaces `api.ipify.org` as the kill-switch / tunnel health oracle with Cloudflare `1.1.1.1/cdn-cgi/trace` over the reverse SOCKS tunnel.
+- Retries tunnel probes to avoid false negatives from a single external service.
+- Kill-switch now requires 5 consecutive failed probe cycles (each cycle retries twice) before stopping the customer gateway.
+- Local VLESS/REALITY end-to-end self-test uses the same fixed endpoint, so intermittent `api.ipify.org` failures no longer look like REALITY failures.
+- Pairing Code is unchanged and remains fully supported.
+- Keeps the v4.0.1 SQLite/WAL subscription fix and v4.0.3 endpoint/REALITY diagnostics.
+
+# v4.0.4 — Client Endpoint Separation + Deeper REALITY Diagnostics
 
 - Separates the VLESS client endpoint from the HTTPS subscription hostname. The VLESS endpoint now defaults to the Iran public IP, while a domain such as `vp.example.com` can remain dedicated to HTTPS subscriptions.
 - `Upgrade / repair runtime` migrates older v4.0.2 state by adding `client_host` with the detected Iran public IP without changing the subscription domain, certificate, users, UUIDs, Reality keys, quota or expiry.
@@ -7,7 +16,7 @@
 - The local REALITY client self-test now runs with debug logging, includes `spiderX=/`, and prints recent server access/error logs when the end-to-end test fails.
 - Keeps the v4.0.1 SQLite/WAL subscription-service fix and all production hardening from v4.0.2.
 
-# Iran ↔ Turkey Gateway Manager — v4.0.3 Minimal Production Edition
+# Iran ↔ Turkey Gateway Manager — v4.0.4 Minimal Production Edition
 
 ## v4.0.1 HTTPS subscription fix
 
@@ -110,7 +119,7 @@ The user database remains at:
 
 `/etc/singbox-manager/data/users.db`
 
-Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.3, use:
+Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.4, use:
 
 `Maintenance` → `Cleanup legacy experimental components`
 

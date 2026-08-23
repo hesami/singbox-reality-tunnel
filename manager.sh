@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Iran-Turkey Gateway Manager v4.0.3 — minimal production edition.
+# Iran-Turkey Gateway Manager v4.0.4 — minimal production edition.
 set -uo pipefail
 trap 'echo "ERROR: command failed near line $LINENO" >&2' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -16,9 +16,13 @@ ensure_packages(){
     apt-get update -qq >/dev/null 2>&1 && apt-get install -y "${missing[@]}" >/dev/null 2>&1 || { print_error "Package installation failed: ${missing[*]}"; return 1; }
 }
 get_public_ip(){
-    local u ip
-    for u in https://api.ipify.org https://ifconfig.me/ip https://ipv4.icanhazip.com; do
-        ip=$(curl -4fsS --connect-timeout 5 "$u" 2>/dev/null | tr -d '[:space:]' || true)
+    local u ip body
+    # Prefer Cloudflare's fixed trace endpoint; then fall back to independent services.
+    body=$(curl -4kfsS --connect-timeout 4 --max-time 8 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+    ip=$(printf '%s\n' "$body" | awk -F= '$1=="ip"{print $2;exit}' | tr -d '[:space:]')
+    [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && { echo "$ip"; return 0; }
+    for u in https://ifconfig.me/ip https://ipv4.icanhazip.com https://api.ipify.org; do
+        ip=$(curl -4fsS --connect-timeout 5 --max-time 8 "$u" 2>/dev/null | tr -d '[:space:]' || true)
         [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && { echo "$ip"; return 0; }
     done
     echo unknown; return 1

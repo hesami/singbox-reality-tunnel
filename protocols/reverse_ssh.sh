@@ -179,9 +179,21 @@ EOF2
 }
 rssh_wait_listener(){ local port="$1" timeout="${2:-45}" i; for((i=0;i<timeout;i++)); do ss -H -ltn 2>/dev/null | awk -v p=":${port}" '$4 ~ p"$"{f=1}END{exit !f}' && return 0; sleep 1; done; return 1; }
 rssh_test_socks(){
-    local port="${1:-10808}" timeout="${2:-15}" out
-    out=$(curl -fsS --max-time "$timeout" --connect-timeout 6 --socks5-hostname "127.0.0.1:${port}" https://api.ipify.org 2>/tmp/reverse-ssh-curl.err | tr -d '[:space:]' || true)
-    [[ "$out" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || "$out" =~ ^[0-9a-fA-F:]+$ ]] || return 1; echo "$out"
+    # Do not use a single public-IP service as a tunnel health oracle. Some
+    # providers intermittently throttle VPS traffic and can trigger false
+    # kill-switch failures. Probe a fixed Cloudflare endpoint first and retry.
+    local port="${1:-10808}" timeout="${2:-15}" body ip i per_try
+    per_try=$(( timeout / 3 )); (( per_try < 3 )) && per_try=3; (( per_try > 8 )) && per_try=8
+    : > /tmp/reverse-ssh-curl.err 2>/dev/null || true
+    for i in 1 2 3; do
+        body=$(curl -4kfsS --max-time "$per_try" --connect-timeout 3           --socks5 "127.0.0.1:${port}" https://1.1.1.1/cdn-cgi/trace           2>>/tmp/reverse-ssh-curl.err || true)
+        ip=$(printf '%s\n' "$body" | awk -F= '$1=="ip"{print $2; exit}' | tr -d '[:space:]')
+        if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            echo "$ip"; return 0
+        fi
+        sleep 0.4
+    done
+    return 1
 }
 rssh_rotate_key(){
     rssh_ensure_client || return 1; mkdir -p "$RSSH_DIR"; local stamp; stamp=$(date +%Y%m%d-%H%M%S)

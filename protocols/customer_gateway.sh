@@ -110,7 +110,7 @@ config={
  'policy':{'levels':{'0':{'statsUserUplink':True,'statsUserDownlink':True}}},
  'api':{'tag':'api','listen':'127.0.0.1:10085','services':['StatsService']},
  'inbounds':[
-  {'listen':'0.0.0.0','port':int(state['port']),'protocol':'vless','tag':'customer-in','settings':{'users':users,'decryption':'none'},
+  {'listen':'0.0.0.0','port':int(state['port']),'protocol':'vless','tag':'customer-in','settings':{'clients':users,'decryption':'none'},
    'streamSettings':{'method':'raw','security':'reality','realitySettings':{'show':False,'target':state['sni']+':443','xver':0,'serverNames':[state['sni']],'privateKey':state['private_key'],'minClientVer':'26.3.27','shortIds':[state['short_id']]}}}
  ],
  'outbounds':[

@@ -1,3 +1,9 @@
+# v4.0.5 — Xray 26.3.27 VLESS Compatibility Fix
+
+This release fixes a critical VLESS authentication regression seen with Xray-core 26.3.27. The gateway generator now writes inbound users through the backward-compatible `settings.clients` key. Xray 26.3.27 predates the later `users` rename/alias and can silently start with an empty VLESS user list when `settings.users` is used, producing `invalid request user id` even when the UUID shown in the log exactly matches the configured UUID.
+
+`Upgrade / Repair Customer Gateway` rewrites the runtime configuration with `clients`, validates it, restarts the gateway, preserves existing users/UUIDs/REALITY keys/TLS certificate/endpoints, and reruns the end-to-end client-path self-test. Pairing Code and Reverse SSH behavior are unchanged.
+
 # v4.0.4 — Stable Tunnel Health Checks
 
 - Replaces `api.ipify.org` as the kill-switch / tunnel health oracle with Cloudflare `1.1.1.1/cdn-cgi/trace` over the reverse SOCKS tunnel.
@@ -16,7 +22,7 @@
 - The local REALITY client self-test now runs with debug logging, includes `spiderX=/`, and prints recent server access/error logs when the end-to-end test fails.
 - Keeps the v4.0.1 SQLite/WAL subscription-service fix and all production hardening from v4.0.2.
 
-# Iran ↔ Turkey Gateway Manager — v4.0.4 Minimal Production Edition
+# Iran ↔ Turkey Gateway Manager — v4.0.5 Minimal Production Edition
 
 ## v4.0.1 HTTPS subscription fix
 
@@ -119,7 +125,7 @@ The user database remains at:
 
 `/etc/singbox-manager/data/users.db`
 
-Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.4, use:
+Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.5, use:
 
 `Maintenance` → `Cleanup legacy experimental components`
 

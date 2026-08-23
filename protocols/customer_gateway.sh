@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Customer Gateway v3.0.16 hardened: VLESS+Reality on Iran -> local reverse-SSH SOCKS -> Turkey.
+# Customer Gateway v4.1.0: pinned known-good VLESS+Reality data-plane on Iran -> reverse-SSH SOCKS -> Turkey.
 # Does not modify nginx, websites, or ports 80/443.
 
 CGW_DIR="/etc/customer-gateway"
@@ -110,8 +110,8 @@ config={
  'policy':{'levels':{'0':{'statsUserUplink':True,'statsUserDownlink':True}}},
  'api':{'tag':'api','listen':'127.0.0.1:10085','services':['StatsService']},
  'inbounds':[
-  {'listen':'0.0.0.0','port':int(state['port']),'protocol':'vless','tag':'customer-in','settings':{'clients':users,'decryption':'none'},
-   'streamSettings':{'method':'raw','security':'reality','realitySettings':{'show':False,'target':state['sni']+':443','xver':0,'serverNames':[state['sni']],'privateKey':state['private_key'],'minClientVer':'26.3.27','shortIds':[state['short_id']]}}}
+  {'listen':'0.0.0.0','port':int(state['port']),'protocol':'vless','tag':'customer-in','settings':{'users':users,'decryption':'none'},
+   'streamSettings':{'method':'raw','security':'reality','realitySettings':{'show':False,'target':state['sni']+':443','xver':0,'serverNames':[state['sni']],'privateKey':state['private_key'],'shortIds':[state['short_id']]}}}
  ],
  'outbounds':[
   {'protocol':'socks','tag':'turkey-exit','settings':{'address':'127.0.0.1','port':int(state['exit_socks_port'])}},
@@ -437,7 +437,7 @@ PY
 cgw_local_client_test(){
     cgw_installed || { echo "GATEWAY_NOT_CONFIGURED"; return 2; }
     systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null || { echo "GATEWAY_NOT_RUNNING"; return 3; }
-    local uuid state_port sni pub sid test_port tmp log pid out expected i
+    local uuid state_port sni pub sid test_port tmp log pid out expected i err_start access_start
     uuid=$(cgw_pick_test_user 2>/dev/null || true)
     [[ -n "$uuid" ]] || { echo "NO_ACTIVE_USER"; return 4; }
     state_port=$(cgw_state_get port); sni=$(cgw_state_get sni); pub=$(cgw_state_get public_key); sid=$(cgw_state_get short_id)
@@ -448,6 +448,8 @@ cgw_local_client_test(){
         if ! ss -H -ltn 2>/dev/null | awk -v p=":$i" '$4 ~ p"$"{f=1}END{exit !f}'; then test_port=$i; break; fi
     done
     tmp=$(mktemp --suffix=.json); log=$(mktemp)
+    err_start=$(wc -l </var/log/customer-gateway-error.log 2>/dev/null || echo 0)
+    access_start=$(wc -l </var/log/customer-gateway-access.log 2>/dev/null || echo 0)
     UUID="$uuid" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" python3 - "$tmp" <<'PY'
 import json,os,sys
 cfg={
@@ -455,7 +457,7 @@ cfg={
  'inbounds':[{'listen':'127.0.0.1','port':int(os.environ['LPORT']),'protocol':'socks','settings':{'auth':'noauth','udp':False}}],
  'outbounds':[{
    'tag':'proxy','protocol':'vless',
-   'settings':{'address':'127.0.0.1','port':int(os.environ['PORT']),'id':os.environ['UUID'],'encryption':'none'},
+   'settings':{'vnext':[{'address':'127.0.0.1','port':int(os.environ['PORT']),'users':[{'id':os.environ['UUID'],'encryption':'none'}]}]},
    'streamSettings':{'method':'raw','security':'reality','realitySettings':{
       'serverName':os.environ['SNI'],'fingerprint':'chrome','password':os.environ['PUB'],'shortId':os.environ['SID'],'spiderX':'/'
    }}
@@ -477,12 +479,12 @@ PY
     echo "LOCAL_REALITY_FAILED expected=${expected:-?} got=${out:-none}"
     sed -n '1,140p' "$log" | sed 's/^/XRAY_CLIENT: /'
     if [[ -s /var/log/customer-gateway-error.log ]]; then
-        echo "SERVER_ERROR_LOG:"
-        tail -n 40 /var/log/customer-gateway-error.log | sed 's/^/XRAY_SERVER: /'
+        echo "SERVER_ERROR_LOG_NEW:"
+        sed -n "$((err_start+1)),\$p" /var/log/customer-gateway-error.log | tail -n 60 | sed 's/^/XRAY_SERVER: /'
     fi
     if [[ -s /var/log/customer-gateway-access.log ]]; then
-        echo "SERVER_ACCESS_LOG:"
-        tail -n 20 /var/log/customer-gateway-access.log | sed 's/^/XRAY_SERVER_ACCESS: /'
+        echo "SERVER_ACCESS_LOG_NEW:"
+        sed -n "$((access_start+1)),\$p" /var/log/customer-gateway-access.log | tail -n 40 | sed 's/^/XRAY_SERVER_ACCESS: /'
     fi
     rm -f "$tmp" "$log"; return 7
 }
@@ -598,7 +600,7 @@ HOOK
     echo -e "  Subscription    : ${CYAN}${CGW_TLS_SCHEME}://${CGW_TLS_HOST}:${sub_port}/sub/<user-token>${NC}"
     echo -e "  Turkey exit IP  : ${CYAN}${exit_ip}${NC}\n"
     print_info "Create users from User Management. Each user gets an individual quota, expiry and subscription URL."
-    print_info "Client requirement: v2rayN should use Xray-core 26.3.27 or newer for this REALITY profile."
+    print_info "Server runtime is pinned to Xray-core 26.7.28. v2rayN should use Xray-core 26.3.27 or newer."
     press_enter
 }
 
@@ -636,15 +638,30 @@ cgw_upgrade_runtime(){
     code=$(curl -ksS --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' "${scheme}://127.0.0.1:${sub_port}/sub/__gateway_health_probe__" 2>/dev/null || true)
     [[ "$code" == 401 ]] && print_success "Subscription runtime self-test passed." || print_warn "Subscription runtime returned HTTP ${code:-no-response}."
     rt=$(cgw_local_client_test 2>&1); rc=$?
-    if ((rc==0)); then print_success "VLESS/REALITY → Turkey self-test passed: $rt"; elif ((rc==4)); then print_info "Client-path self-test skipped: no active customer."; else print_warn "Client-path self-test failed: $rt"; fi
-    print_success "Runtime upgrade/repair completed without changing customer credentials or TLS certificate."
+    if ((rc==0)); then
+        print_success "VLESS/REALITY → Turkey self-test passed: $rt"
+    elif ((rc==4)); then
+        print_info "Client-path self-test skipped: no active customer."
+    else
+        print_error "Client-path self-test FAILED. Runtime is not being reported healthy."
+        printf '%s\n' "$rt" | sed 's/^/  /'
+        press_enter
+        return 1
+    fi
+    print_success "Runtime upgrade/repair completed and validated end-to-end."
     press_enter
 }
 
 cgw_status(){
     print_banner; print_header "Customer Gateway Status"
     service_status_line "$CGW_SERVICE" "Customer VLESS gateway"; service_status_line "$CGW_SUB_SERVICE" "Subscription service"; service_status_line customer-gateway-watchdog.timer "Kill-switch watchdog"
-    local exit; exit=$(rssh_test_socks 10808 10 || true); echo -e "  Turkey exit             : ${CYAN}${exit:-FAILED}${NC}"
+    local exit xv; exit=$(rssh_test_socks 10808 10 || true); xv=$(xray_current_version 2>/dev/null || true)
+    echo -e "  Foreign exit            : ${CYAN}${exit:-FAILED}${NC}"
+    if [[ "$xv" == "$XRAY_PINNED_VERSION" ]]; then
+        echo -e "  Xray data-plane         : ${CYAN}v${xv} (pinned)${NC}"
+    else
+        echo -e "  Xray data-plane         : ${YELLOW}v${xv:-missing} (expected v${XRAY_PINNED_VERSION})${NC}"
+    fi
     if [[ -s "$CGW_STATE" ]]; then
         echo -e "  Client endpoint         : ${CYAN}$(cgw_client_host):$(cgw_state_get port)${NC}"
         echo -e "  Subscription endpoint   : ${CYAN}$(cgw_state_get sub_scheme)://$(cgw_state_get sub_host):$(cgw_state_get sub_port)${NC}"

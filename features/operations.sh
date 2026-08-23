@@ -22,7 +22,7 @@ overall_health(){
     if [[ -s "$CGW_STATE" ]]; then
         echo -e "  Client endpoint         : ${CYAN}$(cgw_client_host):$(cgw_state_get port)${NC}"
         echo -e "  Subscription endpoint   : ${CYAN}$(cgw_state_get sub_scheme)://$(cgw_state_get sub_host):$(cgw_state_get sub_port)/sub/<token>${NC}"
-        echo -e "  Minimum client core     : ${CYAN}Xray 26.3.27+${NC}"
+        echo -e "  Server Xray data-plane  : ${CYAN}pinned v26.7.28${NC}"
         if ss -H -ltn 2>/dev/null | grep -qE ":$(cgw_state_get port)[[:space:]]"; then print_success "Customer port is listening locally: $(cgw_state_get port)/tcp"; else print_warn "Customer port is NOT listening locally: $(cgw_state_get port)/tcp"; fi
         cgw_reality_target_test && print_success "REALITY target reachable from Iran." || print_warn "REALITY target check failed."
         local rt rc; rt=$(cgw_local_client_test 2>&1); rc=$?

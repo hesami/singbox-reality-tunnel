@@ -1,33 +1,69 @@
 #!/usr/bin/env bash
 # Xray-core runtime used only by the customer gateway.
+# The customer data-plane is intentionally pinned to the exact Xray build that
+# was verified working for this project. Do not silently drift to "latest".
 XRAY_BIN="/usr/local/bin/xray"
-XRAY_VERSION=""
+XRAY_PINNED_VERSION="26.7.28"
+XRAY_VERSION="$XRAY_PINNED_VERSION"
 
-fetch_xray_version(){
-    local ver
-    ver=$(curl -fsSL -H 'User-Agent: gateway-manager' https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null | grep '"tag_name"' | grep -oP '"v\K[0-9][^"]+' | head -1 || true)
-    XRAY_VERSION="${ver:-26.7.28}"
+_xray_arch(){
+    case "$(uname -m)" in
+      x86_64|amd64) echo 64 ;;
+      aarch64|arm64) echo arm64-v8a ;;
+      armv7l) echo arm32-v7a ;;
+      *) return 1 ;;
+    esac
 }
-_xray_arch(){ case "$(uname -m)" in x86_64|amd64) echo 64;; aarch64|arm64) echo arm64-v8a;; armv7l) echo arm32-v7a;; *) return 1;; esac; }
+
+xray_current_version(){
+    [[ -x "$XRAY_BIN" ]] || return 1
+    "$XRAY_BIN" version 2>/dev/null | awk 'NR==1{print $2}'
+}
+
 xray_install_binary(){
-    local version="${1:-$XRAY_VERSION}" arch tmp url
+    local version="${1:-$XRAY_PINNED_VERSION}" arch tmp url staged got
     arch=$(_xray_arch) || { print_error "Unsupported CPU: $(uname -m)"; return 1; }
     ensure_packages curl unzip ca-certificates >/dev/null || return 1
-    tmp=$(mktemp -d); url="https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip"
-    print_info "Downloading Xray-core v${version}..."
-    curl -fL --retry 3 --connect-timeout 15 -o "$tmp/xray.zip" "$url" >/dev/null 2>&1 || { rm -rf "$tmp"; print_error "Xray download failed."; return 1; }
-    unzip -q -o "$tmp/xray.zip" -d "$tmp" || { rm -rf "$tmp"; return 1; }
-    install -m755 "$tmp/xray" "$XRAY_BIN"; rm -rf "$tmp"
-    print_success "Xray-core installed: $($XRAY_BIN version 2>/dev/null | head -1 | awk '{print $2}')"
+    tmp=$(mktemp -d)
+    url="https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip"
+    print_info "Installing pinned Xray-core v${version}..."
+    curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 180 -o "$tmp/xray.zip" "$url" >/dev/null 2>&1 || {
+        rm -rf "$tmp"; print_error "Xray v${version} download failed."; return 1;
+    }
+    unzip -q -o "$tmp/xray.zip" -d "$tmp" || { rm -rf "$tmp"; print_error "Xray archive extraction failed."; return 1; }
+    [[ -x "$tmp/xray" ]] || { rm -rf "$tmp"; print_error "Xray binary missing from release archive."; return 1; }
+    got=$("$tmp/xray" version 2>/dev/null | awk 'NR==1{print $2}')
+    [[ "$got" == "$version" ]] || {
+        rm -rf "$tmp"; print_error "Downloaded Xray version mismatch: expected ${version}, got ${got:-unknown}."; return 1;
+    }
+    staged="${XRAY_BIN}.new.$$"
+    install -m755 "$tmp/xray" "$staged" || { rm -rf "$tmp" "$staged"; return 1; }
+    mv -f "$staged" "$XRAY_BIN" || { rm -rf "$tmp" "$staged"; return 1; }
+    rm -rf "$tmp"
+    got=$(xray_current_version 2>/dev/null || true)
+    [[ "$got" == "$version" ]] || { print_error "Installed Xray verification failed."; return 1; }
+    print_success "Xray-core normalized to v${got}."
 }
+
 xray_ensure(){
-    [[ -x "$XRAY_BIN" ]] && return 0
-    fetch_xray_version; xray_install_binary "$XRAY_VERSION"
+    local current
+    current=$(xray_current_version 2>/dev/null || true)
+    if [[ "$current" == "$XRAY_PINNED_VERSION" ]]; then
+        return 0
+    fi
+    if [[ -n "$current" ]]; then
+        print_warn "Xray runtime drift detected: v${current}; required v${XRAY_PINNED_VERSION}."
+    else
+        print_info "Xray runtime is not installed."
+    fi
+    xray_install_binary "$XRAY_PINNED_VERSION"
 }
+
 xray_generate_reality_keypair(){
     local out priv pub
     out=$($XRAY_BIN x25519 2>/dev/null) || return 1
     priv=$(printf '%s\n' "$out" | sed -nE 's/^Private[[:space:]]*[Kk]ey:[[:space:]]*//p;s/^PrivateKey:[[:space:]]*//p' | head -1)
     pub=$(printf '%s\n' "$out" | sed -nE 's/^Password( \(PublicKey\))?:[[:space:]]*//p;s/^Public[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -1)
-    [[ -n "$priv" && -n "$pub" ]] || return 1; printf '%s|%s\n' "$priv" "$pub"
+    [[ -n "$priv" && -n "$pub" ]] || return 1
+    printf '%s|%s\n' "$priv" "$pub"
 }

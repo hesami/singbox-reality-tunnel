@@ -44,7 +44,7 @@ users_add(){
     local rt rc
     rt=$(cgw_local_client_test 2>&1); rc=$?
     if ((rc==0)); then print_success "Server-side VLESS/REALITY path verified through Turkey: $rt"; else print_warn "Server-side client-path self-test did not pass: $rt"; fi
-    print_info "For v2rayN, use Xray-core 26.3.27 or newer."
+    print_info "For v2rayN, use a current Xray-core; server runtime is pinned to v26.7.28."
     print_qr "$sub" "$label"; press_enter
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Customer Gateway v4.1.0: pinned known-good VLESS+Reality data-plane on Iran -> reverse-SSH SOCKS -> Turkey.
+# Customer Gateway v4.2.0: domain-first endpoint + external-path VLESS/Reality validation via the foreign exit.
 # Does not modify nginx, websites, or ports 80/443.
 
 CGW_DIR="/etc/customer-gateway"
@@ -34,6 +34,36 @@ cgw_client_host() {
     h=$(cgw_state_get client_host 2>/dev/null || true)
     [[ -n "$h" ]] || h=$(cgw_state_get host 2>/dev/null || true)
     printf '%s\n' "$h"
+}
+
+cgw_is_domain() {
+    local h="$1"
+    [[ -n "$h" && ! "$h" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ && "$h" == *.* ]]
+}
+
+cgw_resolve_v4() {
+    local h="$1"
+    python3 - "$h" <<'PYDNS'
+import socket,sys
+h=sys.argv[1]
+try:
+    seen=[]
+    for x in socket.getaddrinfo(h,None,socket.AF_INET,socket.SOCK_STREAM):
+        ip=x[4][0]
+        if ip not in seen: seen.append(ip)
+    print(' '.join(seen))
+except Exception:
+    pass
+PYDNS
+}
+
+cgw_domain_points_to_self() {
+    local h="$1" self_ip ips
+    cgw_is_domain "$h" || return 1
+    self_ip=$(get_public_ip 2>/dev/null || true)
+    [[ -n "$self_ip" && "$self_ip" != unknown ]] || return 2
+    ips=$(cgw_resolve_v4 "$h")
+    [[ " $ips " == *" $self_ip "* ]]
 }
 
 cgw_state_set() {
@@ -437,12 +467,20 @@ PY
 cgw_local_client_test(){
     cgw_installed || { echo "GATEWAY_NOT_CONFIGURED"; return 2; }
     systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null || { echo "GATEWAY_NOT_RUNNING"; return 3; }
-    local uuid state_port sni pub sid test_port tmp log pid out expected i err_start access_start
+    local uuid state_port client_host sni pub sid test_port tmp log pid out expected i err_start access_start
     uuid=$(cgw_pick_test_user 2>/dev/null || true)
     [[ -n "$uuid" ]] || { echo "NO_ACTIVE_USER"; return 4; }
-    state_port=$(cgw_state_get port); sni=$(cgw_state_get sni); pub=$(cgw_state_get public_key); sid=$(cgw_state_get short_id)
+    state_port=$(cgw_state_get port)
+    client_host=$(cgw_client_host)
+    sni=$(cgw_state_get sni); pub=$(cgw_state_get public_key); sid=$(cgw_state_get short_id)
+
+    # Prove the reverse SOCKS first. Then dial the public customer endpoint THROUGH
+    # that SOCKS so the probe exits from the foreign server and re-enters Iran like
+    # a real remote client. This avoids false negatives from same-host loopback.
     expected=$(rssh_test_socks 10808 12 || true)
-    [[ -n "$expected" ]] || { echo "TURKEY_SOCKS_FAILED"; return 5; }
+    [[ -n "$expected" ]] || { echo "FOREIGN_SOCKS_FAILED"; return 5; }
+    [[ -n "$client_host" ]] || { echo "CLIENT_ENDPOINT_MISSING"; return 6; }
+
     test_port=19081
     for i in $(seq 19081 19120); do
         if ! ss -H -ltn 2>/dev/null | awk -v p=":$i" '$4 ~ p"$"{f=1}END{exit !f}'; then test_port=$i; break; fi
@@ -450,43 +488,49 @@ cgw_local_client_test(){
     tmp=$(mktemp --suffix=.json); log=$(mktemp)
     err_start=$(wc -l </var/log/customer-gateway-error.log 2>/dev/null || echo 0)
     access_start=$(wc -l </var/log/customer-gateway-access.log 2>/dev/null || echo 0)
-    UUID="$uuid" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" python3 - "$tmp" <<'PY'
+
+    UUID="$uuid" HOST="$client_host" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" python3 - "$tmp" <<'PYTEST'
 import json,os,sys
 cfg={
  'log':{'loglevel':'debug'},
  'inbounds':[{'listen':'127.0.0.1','port':int(os.environ['LPORT']),'protocol':'socks','settings':{'auth':'noauth','udp':False}}],
- 'outbounds':[{
+ 'outbounds':[
+  {
    'tag':'proxy','protocol':'vless',
-   'settings':{'vnext':[{'address':'127.0.0.1','port':int(os.environ['PORT']),'users':[{'id':os.environ['UUID'],'encryption':'none'}]}]},
+   'settings':{'address':os.environ['HOST'],'port':int(os.environ['PORT']),'id':os.environ['UUID'],'encryption':'none'},
    'streamSettings':{'method':'raw','security':'reality','realitySettings':{
       'serverName':os.environ['SNI'],'fingerprint':'chrome','password':os.environ['PUB'],'shortId':os.environ['SID'],'spiderX':'/'
-   }}
- }]
+   }},
+   'proxySettings':{'tag':'foreign-hop','transportLayer':True}
+  },
+  {'tag':'foreign-hop','protocol':'socks','settings':{'address':'127.0.0.1','port':10808}}
+ ]
 }
 with open(sys.argv[1],'w') as f: json.dump(cfg,f)
-PY
-    "$XRAY_BIN" run -test -config "$tmp" >"$log" 2>&1 || { cat "$log"; rm -f "$tmp" "$log"; return 6; }
+PYTEST
+    "$XRAY_BIN" run -test -config "$tmp" >"$log" 2>&1 || { cat "$log"; rm -f "$tmp" "$log"; return 7; }
     "$XRAY_BIN" run -config "$tmp" >"$log" 2>&1 & pid=$!
     for i in 1 2 3 4 5; do
         sleep 0.4
         ss -H -ltn 2>/dev/null | awk -v p=":$test_port" '$4 ~ p"$"{f=1}END{exit !f}' && break
     done
     local trace
-    trace=$(curl -4kfsS --connect-timeout 5 --max-time 15 --socks5 "127.0.0.1:${test_port}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+    trace=$(curl -4kfsS --connect-timeout 6 --max-time 20 --socks5 "127.0.0.1:${test_port}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
     out=$(printf '%s\n' "$trace" | awk -F= '$1=="ip"{print $2;exit}' | tr -d '[:space:]')
     kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true
     if [[ -n "$out" && "$out" == "$expected" ]]; then rm -f "$tmp" "$log"; echo "$out"; return 0; fi
-    echo "LOCAL_REALITY_FAILED expected=${expected:-?} got=${out:-none}"
-    sed -n '1,140p' "$log" | sed 's/^/XRAY_CLIENT: /'
+
+    echo "EXTERNAL_REALITY_FAILED endpoint=${client_host}:${state_port} expected_exit=${expected:-?} got=${out:-none}"
+    sed -n '1,180p' "$log" | sed 's/^/XRAY_CLIENT: /'
     if [[ -s /var/log/customer-gateway-error.log ]]; then
         echo "SERVER_ERROR_LOG_NEW:"
-        sed -n "$((err_start+1)),\$p" /var/log/customer-gateway-error.log | tail -n 60 | sed 's/^/XRAY_SERVER: /'
+        sed -n "$((err_start+1)),\$p" /var/log/customer-gateway-error.log | tail -n 80 | sed 's/^/XRAY_SERVER: /'
     fi
     if [[ -s /var/log/customer-gateway-access.log ]]; then
         echo "SERVER_ACCESS_LOG_NEW:"
-        sed -n "$((access_start+1)),\$p" /var/log/customer-gateway-access.log | tail -n 40 | sed 's/^/XRAY_SERVER_ACCESS: /'
+        sed -n "$((access_start+1)),\$p" /var/log/customer-gateway-access.log | tail -n 60 | sed 's/^/XRAY_SERVER_ACCESS: /'
     fi
-    rm -f "$tmp" "$log"; return 7
+    rm -f "$tmp" "$log"; return 8
 }
 
 cgw_probe_reality_sni(){
@@ -532,15 +576,26 @@ cgw_setup(){
         old=1; legacy_host=$(cgw_state_get host); host=$(cgw_client_host); port=$(cgw_state_get port); sub_port=$(cgw_state_get sub_port); sni=$(cgw_state_get sni)
         sid=$(cgw_state_get short_id); priv=$(cgw_state_get private_key); pub=$(cgw_state_get public_key)
         cur_scheme=$(cgw_state_get sub_scheme); cur_subhost=$(cgw_state_get sub_host); cur_cert=$(cgw_state_get tls_cert); cur_key=$(cgw_state_get tls_key)
-        # v4.0.2 and older used one hostname for both VLESS and Subscription.
-        # Prefer the actual public IP for the VLESS endpoint, while keeping the HTTPS subscription domain separate.
-        if [[ -z "$(cgw_state_get client_host 2>/dev/null || true)" && -n "$detected_ip" && "$detected_ip" != "unknown" ]]; then host="$detected_ip"; fi
+        # Prefer a configured customer domain. Subscription and VLESS may share one domain.
+        if [[ -z "$(cgw_state_get client_host 2>/dev/null || true)" ]]; then
+            if cgw_is_domain "$cur_subhost"; then host="$cur_subhost"; elif [[ -n "$detected_ip" && "$detected_ip" != unknown ]]; then host="$detected_ip"; fi
+        fi
         print_info "Existing gateway detected. Current keys/certificate are preserved by default."
     else
         host="${detected_ip:-unknown}"; port="$CGW_DEFAULT_PORT"; sub_port="$CGW_DEFAULT_SUB_PORT"; sni="www.speedtest.net"
         cur_scheme=""; cur_subhost=""; cur_cert=""; cur_key=""
     fi
-    ask host "  VLESS client endpoint (public IP recommended)" "$host"
+    ask host "  VLESS client endpoint (domain recommended)" "$host"
+    if cgw_is_domain "$host"; then
+        local resolved_v4; resolved_v4=$(cgw_resolve_v4 "$host")
+        if [[ -n "$detected_ip" && "$detected_ip" != unknown && " $resolved_v4 " == *" $detected_ip "* ]]; then
+            print_success "Client domain resolves directly to this Iran server: $host → $detected_ip"
+        else
+            print_warn "Client domain does not currently resolve directly to this Iran public IP (${detected_ip:-unknown})."
+            print_info "Resolved IPv4: ${resolved_v4:-none}. Non-standard ports require a direct/DNS-only record unless your DNS proxy explicitly supports them."
+            confirm "Continue with this client domain anyway?" n || { press_enter; return 1; }
+        fi
+    fi
     ask port "  VLESS Reality TCP port" "$port"; valid_port "$port" || { print_error "Invalid port."; press_enter; return 1; }
     ask sub_port "  Subscription port" "$sub_port"; valid_port "$sub_port" || { print_error "Invalid subscription port."; press_enter; return 1; }
     ask sni "  Reality camouflage SNI" "$sni"
@@ -551,6 +606,17 @@ cgw_setup(){
         confirm "Continue with this SNI anyway?" n || { print_info "Re-run Setup and choose a reachable TLS target."; press_enter; return 1; }
     fi
     cgw_configure_subscription_tls "${cur_subhost:-$host}" "$cur_scheme" "$cur_subhost" "$cur_cert" "$cur_key" || { print_error "Subscription security setup failed."; press_enter; return 1; }
+
+    # If the operator kept the auto-detected IP at the first prompt but then configured
+    # a valid HTTPS subscription domain that points directly to this VPS, use that same
+    # domain for VLESS links too. This keeps customer configs domain-based by default.
+    if cgw_is_domain "$CGW_TLS_HOST" && [[ "$host" == "$detected_ip" || -z "$host" ]]; then
+        local tls_ips; tls_ips=$(cgw_resolve_v4 "$CGW_TLS_HOST")
+        if [[ -n "$detected_ip" && "$detected_ip" != unknown && " $tls_ips " == *" $detected_ip "* ]]; then
+            host="$CGW_TLS_HOST"
+            print_success "Using the HTTPS domain for customer VLESS links too: $host"
+        fi
+    fi
 
     if ((old)) && [[ -n "$priv" && -n "$pub" && -n "$sid" ]]; then
         keep_keys=y; confirm "Keep existing Reality key pair (recommended)?" y || keep_keys=n
@@ -600,7 +666,7 @@ HOOK
     echo -e "  Subscription    : ${CYAN}${CGW_TLS_SCHEME}://${CGW_TLS_HOST}:${sub_port}/sub/<user-token>${NC}"
     echo -e "  Turkey exit IP  : ${CYAN}${exit_ip}${NC}\n"
     print_info "Create users from User Management. Each user gets an individual quota, expiry and subscription URL."
-    print_info "Server runtime is pinned to Xray-core 26.7.28. v2rayN should use Xray-core 26.3.27 or newer."
+    print_info "Server runtime is pinned to Xray-core 26.7.28. Customer links use the configured domain when it resolves directly to this VPS."
     press_enter
 }
 
@@ -610,13 +676,25 @@ cgw_upgrade_runtime(){
     local port sub_port scheme rc rt detected_ip existing_client
     port=$(cgw_state_get port); sub_port=$(cgw_state_get sub_port); scheme=$(cgw_state_get sub_scheme); [[ -n "$scheme" ]] || scheme=http
     existing_client=$(cgw_state_get client_host 2>/dev/null || true)
-    if [[ -z "$existing_client" ]]; then
-        detected_ip=$(get_public_ip 2>/dev/null || true)
-        if [[ -n "$detected_ip" && "$detected_ip" != "unknown" ]]; then
+    detected_ip=$(get_public_ip 2>/dev/null || true)
+    local sub_host resolved_v4
+    sub_host=$(cgw_state_get sub_host 2>/dev/null || true)
+    # Earlier versions could migrate VLESS links to an IP. Prefer the configured
+    # domain again, but only if it resolves directly to this VPS.
+    if cgw_is_domain "$sub_host"; then
+        resolved_v4=$(cgw_resolve_v4 "$sub_host")
+        if [[ -n "$detected_ip" && "$detected_ip" != unknown && " $resolved_v4 " == *" $detected_ip "* ]]; then
+            if [[ "$existing_client" != "$sub_host" ]]; then
+                cgw_state_set client_host "$sub_host" || true
+                cgw_state_set host "$sub_host" || true
+                print_success "Customer VLESS endpoint normalized to domain: $sub_host → $detected_ip"
+            fi
+        elif [[ -z "$existing_client" && -n "$detected_ip" && "$detected_ip" != unknown ]]; then
             cgw_state_set client_host "$detected_ip" || true
-            print_info "Migrated VLESS client endpoint to detected public IP: $detected_ip"
-            print_info "Subscription HTTPS domain remains unchanged: $(cgw_state_get sub_host)"
+            print_warn "Configured domain does not resolve directly to this VPS; kept IP as the endpoint."
         fi
+    elif [[ -z "$existing_client" && -n "$detected_ip" && "$detected_ip" != unknown ]]; then
+        cgw_state_set client_host "$detected_ip" || true
     fi
     xray_ensure || { press_enter; return 1; }
     ensure_packages python3 openssl cron iptables ca-certificates || { press_enter; return 1; }

@@ -1,74 +1,86 @@
-# Iran ↔ Foreign Gateway Manager — v4.1.0 Known-Good Data Plane
+# Iran ↔ Foreign Gateway Manager — v4.2.0 Domain-First Production
 
-This release freezes the customer data-plane to the exact Xray-core version that was previously verified working in this project: **Xray-core v26.7.28**.
+This is the minimal production branch for the verified architecture:
 
-## Why v4.1.0 exists
+`v2rayN client → Iran VLESS/REALITY → reverse-SSH SOCKS → Foreign exit → Internet`
 
-The control-plane changes (Guided Setup / Pairing Code / hardening) were not supposed to change customer VLESS+REALITY behavior, but later builds allowed the locally installed Xray binary to drift. The affected server ended up on Xray 26.3.27 while generated configuration had fields from newer Xray schemas. That created two misleading failure modes:
+It intentionally keeps only the working production path: Reverse SSH, Customer Gateway, users/quota/expiry, subscriptions, HTTPS, health/security checks, backup/restore, and performance hardening.
 
-- VLESS could start with a user schema that did not match the installed runtime, yielding `invalid request user id` even for the exact configured UUID.
-- REALITY client diagnostics used the newer client-side public-key field while an older runtime could interpret the profile differently, so the diagnostic could fail before VLESS and show no fresh server access entry.
+## v4.2.0: root fixes
 
-v4.1.0 removes that version/schema ambiguity entirely.
+### 1. Domain-first customer endpoint
+Customer VLESS links are no longer forcibly migrated to the Iran IP. If the configured subscription/customer domain resolves directly to the Iran VPS, the manager stores and publishes that domain in VLESS links.
 
-## Data-plane policy
+For example:
 
-- Xray runtime is pinned to **26.7.28**.
-- Setup / Upgrade checks the installed Xray version every time.
-- Any other Xray version is atomically replaced by 26.7.28 before rebuilding the gateway.
-- The generated server profile uses the same VLESS+REALITY shape as the previously working pre-Pairing build:
-  - VLESS inbound `settings.users`
-  - RAW transport (`method: raw`)
-  - REALITY target / SNI / X25519 keys / short ID
-  - no extra experimental REALITY options added by the manager
-- The internal diagnostic client uses the canonical `vnext/users` VLESS outbound form and the v26.7.28 REALITY `password` public-key field.
-- Upgrade is not reported successful if the end-to-end local customer path test fails.
+- Client endpoint: `vp.example.com:24443`
+- Subscription: `https://vp.example.com:18080/sub/<token>`
+- REALITY SNI: independent camouflage target such as `www.speedtest.net`
 
-## Retained architecture
+The client domain and REALITY SNI are separate concepts.
 
-- Pairing Code stays enabled.
-- Reverse SSH remains Turkey/foreign → Iran.
-- SOCKS remains bound to `127.0.0.1:10808` on Iran.
-- Customer traffic path remains:
+For non-standard ports such as 24443 and 18080, the DNS record must reach the VPS directly unless the DNS/CDN proxy explicitly supports those ports. With Cloudflare, this normally means **DNS only** for this host.
 
-  `v2rayN → VLESS+REALITY → Iran → reverse SSH SOCKS → foreign exit → Internet`
+### 2. External-path REALITY validation
+Older builds tested REALITY by connecting from the Iran VPS back to `127.0.0.1:24443`. That is not the same network path as a real customer and could produce a false failure even when v2rayN worked.
 
-- Per-user quota, expiry, traffic accounting and subscriptions remain enabled.
-- Subscription HTTPS/WAL fix remains included.
-- Stable Cloudflare-based tunnel health probing remains included.
-- Kill-switch, dedicated tunnel user/sshd, firewall restriction, key rotation, BBR/TCP tuning and backups remain included.
-- nginx, the existing website and ports 80/443 are not modified.
+v4.2.0 tests the real public endpoint instead:
 
-## Recommended repair for an existing v4 install
+`Iran diagnostic Xray → reverse SSH SOCKS → Foreign exit → public customer domain:24443 → Iran REALITY inbound → reverse SSH SOCKS → Foreign Internet`
 
-Replace the manager source with v4.1.0, then on the Iran server run:
+This validates:
 
-```bash
-bash manager.sh
-```
+- reverse SSH SOCKS
+- public DNS/customer domain
+- public VLESS port reachability from outside Iran
+- REALITY handshake and credentials
+- Iran Xray routing
+- final foreign egress
 
-Choose:
+The diagnostic client uses the current simplified VLESS outbound schema and Xray-core v26.7.28.
 
-`Customer Gateway → Upgrade / repair runtime`
+### 3. Pinned Xray runtime
+The manager pins Xray-core to `26.7.28` and repairs runtime drift during Gateway upgrade. Server and diagnostic client therefore use the same core generation.
 
-The manager will preserve users, UUIDs, subscription tokens, REALITY keys, certificate and endpoints, normalize Xray to v26.7.28, rebuild the gateway and run an end-to-end test.
+### 4. Stable health source
+Tunnel health uses Cloudflare trace via `1.1.1.1`, not `api.ipify.org`, because the latter was observed to time out intermittently even on the foreign VPS itself.
 
-A healthy repair ends with:
+### 5. Subscription SQLite/WAL fix
+The subscription service has write access to `/etc/singbox-manager/data` as required by SQLite WAL/SHM operation, preventing empty HTTP responses.
 
-```text
-VLESS/REALITY → Turkey self-test passed: <foreign-exit-ip>
-Runtime upgrade/repair completed and validated end-to-end.
-```
+## Existing installation upgrade
+Replace only the manager source and run on the Iran server:
 
-If the end-to-end test fails, the command returns failure instead of printing a false success message.
+1. `Customer Gateway`
+2. `Upgrade / repair runtime`
 
-## First installation
+The upgrade preserves:
 
-1. Run `Guided Setup` on the foreign/exit server.
-2. Copy the Pairing Code.
-3. Run `Guided Setup` on the Iran server and paste the Pairing Code.
-4. Configure Customer Gateway.
-5. Create customers from Customer Management.
-6. Add each subscription URL to v2rayN.
+- user database
+- UUIDs
+- quota/expiry
+- REALITY private/public keys
+- Short ID
+- HTTPS certificate
+- subscription tokens
+- reverse-SSH pairing
 
-For v2rayN, use a current Xray-core. The server runtime itself is fixed by the manager at v26.7.28 so future upstream releases cannot silently change the server behavior.
+If the stored VLESS endpoint is an IP but the configured subscription domain resolves directly to the same Iran VPS, v4.2.0 automatically restores the domain as the customer endpoint.
+
+After upgrading, update the subscription once in v2rayN so the node address is refreshed to the domain.
+
+## Fresh setup order
+
+1. Foreign server → Guided Setup → Foreign / Exit Server
+2. Copy Pairing Code
+3. Iran server → Guided Setup → Iran Gateway
+4. Paste Pairing Code
+5. Enable safe TCP/BBR tuning when supported
+6. Configure Customer Gateway
+7. Use a domain that resolves directly to the Iran VPS
+8. Configure HTTPS subscription with existing certificate or DNS-01
+9. Create a customer
+10. Run System Health
+
+## Important
+The manager does not modify nginx, an existing website, or ports 80/443. The default customer ports remain 24443/TCP and 18080/TCP.

@@ -484,10 +484,58 @@ c.close()
 PY
 }
 
+cgw_probe_tcp_via_socks(){
+    local host="$1" port="$2" socks_port="$3" result rc
+    result=$(HOST="$host" PORT="$port" SOCKS_PORT="$socks_port" python3 - <<'PYTCP'
+import os, socket, struct, sys
+host=os.environ['HOST'].strip().strip('[]')
+port=int(os.environ['PORT'])
+socks=int(os.environ['SOCKS_PORT'])
+def readn(s,n):
+    b=b''
+    while len(b)<n:
+        x=s.recv(n-len(b))
+        if not x: raise OSError('proxy closed connection')
+        b+=x
+    return b
+try:
+    with socket.create_connection(('127.0.0.1',socks),timeout=8) as s:
+        s.settimeout(8)
+        s.sendall(b'\x05\x01\x00')
+        if readn(s,2) != b'\x05\x00': raise OSError('SOCKS5 no-auth negotiation failed')
+        try:
+            ip=socket.inet_pton(socket.AF_INET,host); req=b'\x05\x01\x00\x01'+ip+struct.pack('!H',port)
+        except OSError:
+            try:
+                ip=socket.inet_pton(socket.AF_INET6,host); req=b'\x05\x01\x00\x04'+ip+struct.pack('!H',port)
+            except OSError:
+                name=host.encode('idna')
+                if not name or len(name)>255: raise OSError('invalid endpoint hostname')
+                req=b'\x05\x01\x00\x03'+bytes([len(name)])+name+struct.pack('!H',port)
+        s.sendall(req)
+        h=readn(s,4)
+        if h[0] != 5: raise OSError('invalid SOCKS5 response')
+        if h[1] != 0: raise OSError('SOCKS5 CONNECT reply='+str(h[1]))
+        atyp=h[3]
+        if atyp==1: readn(s,4)
+        elif atyp==3: readn(s,readn(s,1)[0])
+        elif atyp==4: readn(s,16)
+        else: raise OSError('invalid SOCKS5 address type')
+        readn(s,2)
+    print('TCP_REACHABLE')
+except Exception as e:
+    print(type(e).__name__+': '+str(e))
+    sys.exit(1)
+PYTCP
+); rc=$?
+    if ((rc==0)); then echo "$result"; return 0; fi
+    echo "TCP_UNREACHABLE ${result:-unknown}"; return 1
+}
+
 cgw_local_client_test(){
     cgw_installed || { echo "GATEWAY_NOT_CONFIGURED"; return 2; }
     systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null || { echo "GATEWAY_NOT_RUNNING"; return 3; }
-    local uuid state_port client_host sni pub sid test_port tmp log pid out expected i err_start access_start exit_port
+    local uuid state_port client_host sni pub sid test_port tmp log pid out expected i err_start access_start exit_port tcp_probe
     exit_port=$(cgw_exit_port)
     uuid=$(cgw_pick_test_user 2>/dev/null || true)
     [[ -n "$uuid" ]] || { echo "NO_ACTIVE_USER"; return 4; }
@@ -501,6 +549,11 @@ cgw_local_client_test(){
     expected=$(rssh_test_socks "$exit_port" 12 || true)
     [[ -n "$expected" ]] || { echo "FOREIGN_SOCKS_FAILED"; return 5; }
     [[ -n "$client_host" ]] || { echo "CLIENT_ENDPOINT_MISSING"; return 6; }
+    tcp_probe=$(cgw_probe_tcp_via_socks "$client_host" "$state_port" "$exit_port") || {
+        echo "EXTERNAL_ENDPOINT_UNREACHABLE endpoint=${client_host}:${state_port} via_foreign_exit=${expected} ${tcp_probe}"
+        return 7
+    }
+    echo "EXTERNAL_ENDPOINT_REACHABLE endpoint=${client_host}:${state_port} via_foreign_exit=${expected}"
 
     test_port=19081
     for i in $(seq 19081 19120); do
@@ -523,7 +576,8 @@ cfg={
    'streamSettings':{'method':'raw','security':'reality','realitySettings':{
       'serverName':os.environ['SNI'],'fingerprint':'chrome','password':os.environ['PUB'],'shortId':os.environ['SID'],'spiderX':'/'
    }},
-   'proxySettings':{'tag':'foreign-hop','transportLayer':True}
+   'proxySettings':{'tag':'foreign-hop','transportLayer':False},
+   'targetStrategy':'UseIPv4'
   },
   {'tag':'foreign-hop','protocol':'socks','settings':{'address':'127.0.0.1','port':int(os.environ['EXITPORT'])}}
  ]

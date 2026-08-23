@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Iran-Turkey Gateway Manager v4.2.0 — minimal production edition.
+# Iran-Turkey Gateway Manager v4.3.1 — production edition.
 set -uo pipefail
 umask 077
 trap 'echo "ERROR: command failed near line $LINENO" >&2' ERR

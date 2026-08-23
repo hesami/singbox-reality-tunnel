@@ -1,4 +1,4 @@
-# Iran ↔ Foreign Gateway Manager — v4.3.0 Domain-First Production
+# Iran ↔ Foreign Gateway Manager — v4.3.1 Domain-First Production
 
 This is the minimal production branch for the verified architecture:
 
@@ -6,7 +6,7 @@ This is the minimal production branch for the verified architecture:
 
 It intentionally keeps only the working production path: Reverse SSH, Customer Gateway, users/quota/expiry, subscriptions, HTTPS, health/security checks, backup/restore, and performance hardening.
 
-## v4.3.0: production hardening
+## v4.3.1: production hardening
 
 - Fixed custom reverse-SOCKS ports: health checks, watchdog, gateway routing, diagnostics and status now use the paired port instead of assuming `10808`.
 - Added strict host/IPv4/port validation to prevent malformed or unsafe service configuration.
@@ -90,4 +90,11 @@ After upgrading, update the subscription once in v2rayN so the node address is r
 10. Run System Health
 
 ## Important
+### Client-path diagnostics
+
+During Upgrade / repair, the manager first opens a raw TCP connection to the configured VLESS endpoint through the foreign SOCKS exit. This separates DNS/firewall/Cloudflare reachability failures from REALITY credential failures:
+
+- `EXTERNAL_ENDPOINT_UNREACHABLE`: the foreign server cannot reach the configured host and port. Use a direct DNS-only A record for the Iran VPS, remove an unsupported proxy/CDN path, ensure the port is allowed, and verify any AAAA record is valid.
+- `EXTERNAL_ENDPOINT_REACHABLE` followed by `EXTERNAL_REALITY_FAILED`: TCP works, but the REALITY endpoint parameters or server runtime need investigation. The diagnostic output includes the relevant Xray logs.
+
 The manager does not modify nginx, an existing website, or ports 80/443. The default customer ports remain 24443/TCP and 18080/TCP.

@@ -23,6 +23,101 @@ print('' if v is None else v)
 PY
 }
 
+# Keep technical client-path diagnostics out of the customer-facing UI.
+# Full details are still written to the manager log for administrators.
+_users_log_client_test_failure(){
+    local rc="$1" output="$2"
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    {
+        printf '%s [WARN] Customer client-path verification failed (rc=%s)\n' "$(date '+%F %T')" "$rc"
+        printf '%s\n' "$output" | sed 's/^/    /'
+    } >>"$MANAGER_LOG" 2>/dev/null || true
+}
+
+_users_client_test_message(){
+    case "$1" in
+      2) echo "Customer Gateway is not configured correctly." ;;
+      3) echo "The customer gateway service is not running." ;;
+      4) echo "No active customer was available for the connection check." ;;
+      5) echo "The Turkey exit connection is temporarily unavailable." ;;
+      6) echo "The public customer endpoint is incomplete or the local test could not start." ;;
+      7) echo "The public customer endpoint could not be reached from the Turkey side." ;;
+      8) echo "The endpoint is reachable, but the secure VLESS/REALITY connection could not be verified." ;;
+      *) echo "The customer was created, but the connection could not be verified." ;;
+    esac
+}
+
+# Safe, non-interactive repair used by Add Customer. It preserves users,
+# REALITY keys, certificates and endpoint settings, and never prints raw logs.
+_users_quiet_gateway_repair(){
+    cgw_installed || return 1
+    local port sub_port
+    port=$(cgw_state_get port 2>/dev/null || true)
+    sub_port=$(cgw_state_get sub_port 2>/dev/null || true)
+
+    cgw_write_rebuild_script >/dev/null 2>&1 || return 1
+    cgw_write_sync_script >/dev/null 2>&1 || return 1
+    cgw_write_subscription_server >/dev/null 2>&1 || return 1
+    cgw_create_services >/dev/null 2>&1 || return 1
+    "$CGW_REBUILD" --force >/dev/null 2>&1 || return 1
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart "$CGW_SERVICE" >/dev/null 2>&1 || return 1
+    systemctl restart "$CGW_SUB_SERVICE" >/dev/null 2>&1 || return 1
+
+    # If the dedicated reverse-tunnel receiver exists on this host, refresh it too.
+    if systemctl cat "$RSSH_SSHD_SERVICE" >/dev/null 2>&1; then
+        systemctl restart "$RSSH_SSHD_SERVICE" >/dev/null 2>&1 || true
+    fi
+
+    valid_port "$port" && open_port "$port" tcp >/dev/null 2>&1 || true
+    valid_port "$sub_port" && open_port "$sub_port" tcp >/dev/null 2>&1 || true
+    sleep 1
+    systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null &&
+        systemctl is-active --quiet "$CGW_SUB_SERVICE" 2>/dev/null
+}
+
+_users_verify_customer_path(){
+    local rt rc choice
+    while true; do
+        if rt=$(cgw_local_client_test 2>&1); then
+            print_success "Connection verified successfully through the Turkey route."
+            return 0
+        else
+            rc=$?
+        fi
+
+        _users_log_client_test_failure "$rc" "$rt"
+        echo
+        print_warn "$(_users_client_test_message "$rc")"
+        print_info "Your customer is saved and no technical error details are shown here."
+        print_info "Diagnostic details were saved to ${MANAGER_LOG}."
+        echo
+        echo -e "  ${CYAN}1)${NC} Try automatic repair ${DIM}(recommended)${NC}"
+        echo -e "  ${CYAN}2)${NC} Test the connection again"
+        echo -e "  ${CYAN}3)${NC} Continue and fix it later"
+        echo -ne "  ${YELLOW}Select option [1]: ${NC}"
+        read -r choice; choice="${choice:-1}"
+        case "$choice" in
+          1)
+            print_info "Applying a safe automatic repair..."
+            if _users_quiet_gateway_repair; then
+                print_info "Repair completed. Checking the connection again..."
+            else
+                print_warn "Automatic repair could not be completed. Your customer data was not changed."
+                print_info "You can retry, or continue and use Customer Gateway → Upgrade / repair runtime later."
+            fi
+            ;;
+          2) print_info "Checking the connection again..." ;;
+          3)
+            print_info "Continuing without connection verification. The customer remains active."
+            return 1
+            ;;
+          *) print_warn "Invalid option. Please choose 1, 2 or 3." ;;
+        esac
+    done
+}
+
 users_add(){
     print_banner; print_header "Add Customer"
     users_gateway_installed || { print_error "Customer Gateway is not configured. Run Customer Gateway → Setup first."; press_enter; return 1; }
@@ -41,9 +136,7 @@ users_add(){
     echo -e "  Quota        : ${CYAN}$([[ "$quota" == 0 ]] && echo Unlimited || echo "${quota} GB")${NC}"
     echo -e "  Validity     : ${CYAN}$([[ "$days" == 0 ]] && echo No-expiry || echo "${days} days")${NC}"
     echo -e "  Subscription : ${GREEN}${BOLD}${sub}${NC}"
-    local rt rc
-    rt=$(cgw_local_client_test 2>&1); rc=$?
-    if ((rc==0)); then print_success "Server-side VLESS/REALITY path verified through Turkey: $rt"; else print_warn "Server-side client-path self-test did not pass: $rt"; fi
+    _users_verify_customer_path || true
     print_info "For v2rayN, use a current Xray-core; server runtime is pinned to v26.7.28."
     print_qr "$sub" "$label"; press_enter
 }

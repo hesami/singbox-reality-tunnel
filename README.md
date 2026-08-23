@@ -1,14 +1,13 @@
-# v4.0.2 — Client Path Diagnostics + Subscription Fix
+# v4.0.3 — Client Endpoint Separation + Deeper REALITY Diagnostics
 
-- Permanently includes the SQLite/WAL systemd permission fix for HTTPS/HTTP subscriptions.
-- Adds a local end-to-end Xray client self-test: VLESS/REALITY -> Iran gateway -> reverse-SSH SOCKS -> foreign exit.
-- Adds REALITY camouflage-target reachability checks.
-- Pins REALITY `minClientVer` to Xray 26.3.27 for deterministic compatibility; v2rayN should use Xray-core 26.3.27 or newer.
-- Adds `headerType=none` and `spx=/` to generated VLESS share links for broader v2rayN parser compatibility.
-- System Health now distinguishes server-side path failures from external port/client problems.
-- Adds a non-destructive `Upgrade / repair runtime` action that refreshes generated services/scripts without changing keys, users, endpoints, or certificates.
+- Separates the VLESS client endpoint from the HTTPS subscription hostname. The VLESS endpoint now defaults to the Iran public IP, while a domain such as `vp.example.com` can remain dedicated to HTTPS subscriptions.
+- `Upgrade / repair runtime` migrates older v4.0.2 state by adding `client_host` with the detected Iran public IP without changing the subscription domain, certificate, users, UUIDs, Reality keys, quota or expiry.
+- Generated v2rayN subscription links use `client_host` (public IP recommended) instead of reusing the subscription domain. This avoids client-side DNS overrides/fake-IP mappings breaking the VLESS TCP connection.
+- Customer Gateway setup now verifies that the selected REALITY target completes a TLS certificate handshake from the Iran VPS before proceeding.
+- The local REALITY client self-test now runs with debug logging, includes `spiderX=/`, and prints recent server access/error logs when the end-to-end test fails.
+- Keeps the v4.0.1 SQLite/WAL subscription-service fix and all production hardening from v4.0.2.
 
-# Iran ↔ Turkey Gateway Manager — v4.0.1 Minimal Production Edition
+# Iran ↔ Turkey Gateway Manager — v4.0.3 Minimal Production Edition
 
 ## v4.0.1 HTTPS subscription fix
 
@@ -111,7 +110,7 @@ The user database remains at:
 
 `/etc/singbox-manager/data/users.db`
 
-Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.1, use:
+Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.3, use:
 
 `Maintenance` → `Cleanup legacy experimental components`
 

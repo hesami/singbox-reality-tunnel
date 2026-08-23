@@ -29,6 +29,25 @@ except Exception:
 PY
 }
 
+cgw_client_host() {
+    local h
+    h=$(cgw_state_get client_host 2>/dev/null || true)
+    [[ -n "$h" ]] || h=$(cgw_state_get host 2>/dev/null || true)
+    printf '%s\n' "$h"
+}
+
+cgw_state_set() {
+    local key="$1" value="$2"
+    [[ -s "$CGW_STATE" ]] || return 1
+    KEY="$key" VALUE="$value" STATE="$CGW_STATE" python3 - <<'PY2'
+import json,os,tempfile
+p=os.environ['STATE']; d=json.load(open(p)); d[os.environ['KEY']]=os.environ['VALUE']
+fd,tmp=tempfile.mkstemp(prefix='.gateway.',suffix='.json',dir=os.path.dirname(p)); os.close(fd)
+with open(tmp,'w') as f: json.dump(d,f,indent=2)
+os.chmod(tmp,0o600); os.replace(tmp,p)
+PY2
+}
+
 cgw_rebuild_if_installed() {
     cgw_installed || return 0
     [[ -x "$CGW_REBUILD" ]] || return 0
@@ -50,7 +69,8 @@ import json, os, urllib.parse
 s=json.load(open(os.environ['STATE']))
 label=urllib.parse.quote(os.environ['LABEL'], safe='')
 q={'encryption':'none','security':'reality','sni':s['sni'],'fp':'chrome','pbk':s['public_key'],'sid':s['short_id'],'type':'tcp','headerType':'none','spx':'/'}
-print(f"vless://{os.environ['UUID']}@{s['host']}:{s['port']}?{urllib.parse.urlencode(q)}#{label}")
+host=s.get('client_host') or s.get('host')
+print(f"vless://{os.environ['UUID']}@{host}:{s['port']}?{urllib.parse.urlencode(q)}#{label}")
 PY
 }
 
@@ -201,7 +221,8 @@ def active(r):
  return True,''
 def link(r,st):
  q={'encryption':'none','security':'reality','sni':st['sni'],'fp':'chrome','pbk':st['public_key'],'sid':st['short_id'],'type':'tcp','headerType':'none','spx':'/'}
- return f"vless://{r['uuid']}@{st['host']}:{st['port']}?{urllib.parse.urlencode(q)}#{urllib.parse.quote(r['label'] or 'User',safe='')}"
+ host=st.get('client_host') or st.get('host')
+ return f"vless://{r['uuid']}@{host}:{st['port']}?{urllib.parse.urlencode(q)}#{urllib.parse.quote(r['label'] or 'User',safe='')}"
 class H(BaseHTTPRequestHandler):
  server_version='Subscription/1.1'
  def log_message(self,*a):pass
@@ -410,13 +431,13 @@ cgw_local_client_test(){
     UUID="$uuid" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" python3 - "$tmp" <<'PY'
 import json,os,sys
 cfg={
- 'log':{'loglevel':'warning'},
+ 'log':{'loglevel':'debug'},
  'inbounds':[{'listen':'127.0.0.1','port':int(os.environ['LPORT']),'protocol':'socks','settings':{'auth':'noauth','udp':False}}],
  'outbounds':[{
    'tag':'proxy','protocol':'vless',
    'settings':{'address':'127.0.0.1','port':int(os.environ['PORT']),'id':os.environ['UUID'],'encryption':'none'},
    'streamSettings':{'method':'raw','security':'reality','realitySettings':{
-      'serverName':os.environ['SNI'],'fingerprint':'chrome','password':os.environ['PUB'],'shortId':os.environ['SID']
+      'serverName':os.environ['SNI'],'fingerprint':'chrome','password':os.environ['PUB'],'shortId':os.environ['SID'],'spiderX':'/'
    }}
  }]
 }
@@ -432,16 +453,28 @@ PY
     kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true
     if [[ -n "$out" && "$out" == "$expected" ]]; then rm -f "$tmp" "$log"; echo "$out"; return 0; fi
     echo "LOCAL_REALITY_FAILED expected=${expected:-?} got=${out:-none}"
-    sed -n '1,80p' "$log" | sed 's/^/XRAY_CLIENT: /'
+    sed -n '1,140p' "$log" | sed 's/^/XRAY_CLIENT: /'
+    if [[ -s /var/log/customer-gateway-error.log ]]; then
+        echo "SERVER_ERROR_LOG:"
+        tail -n 40 /var/log/customer-gateway-error.log | sed 's/^/XRAY_SERVER: /'
+    fi
+    if [[ -s /var/log/customer-gateway-access.log ]]; then
+        echo "SERVER_ACCESS_LOG:"
+        tail -n 20 /var/log/customer-gateway-access.log | sed 's/^/XRAY_SERVER_ACCESS: /'
+    fi
     rm -f "$tmp" "$log"; return 7
 }
 
+cgw_probe_reality_sni(){
+    local sni="$1"
+    [[ -n "$sni" ]] || return 1
+    timeout 10 openssl s_client -connect "${sni}:443" -servername "$sni" </dev/null 2>/dev/null | grep -q 'BEGIN CERTIFICATE'
+}
+
 cgw_reality_target_test(){
-    local sni out
+    local sni
     sni=$(cgw_state_get sni 2>/dev/null || true); [[ -n "$sni" ]] || return 1
-    out=$(timeout 10 "$XRAY_BIN" tls ping "$sni" 2>&1 || true)
-    if printf '%s' "$out" | grep -qiE 'TLS|certificate|handshake|X25519|MLKEM'; then return 0; fi
-    timeout 8 openssl s_client -connect "${sni}:443" -servername "$sni" </dev/null >/dev/null 2>&1
+    cgw_probe_reality_sni "$sni"
 }
 
 cgw_security_audit(){
@@ -469,21 +502,31 @@ cgw_setup(){
     print_success "Turkey exit verified: $exit_ip"
     xray_ensure || { press_enter; return 1; }; ensure_packages python3 openssl cron iptables ca-certificates || { press_enter; return 1; }; db_init || { press_enter; return 1; }
 
-    local old=0 host port sub_port sni sid priv pub kp cur_scheme cur_subhost cur_cert cur_key keep_keys
+    local old=0 host port sub_port sni sid priv pub kp cur_scheme cur_subhost cur_cert cur_key keep_keys detected_ip legacy_host
+    detected_ip=$(get_public_ip 2>/dev/null || true)
     if [[ -s "$CGW_STATE" ]]; then
-        old=1; host=$(cgw_state_get host); port=$(cgw_state_get port); sub_port=$(cgw_state_get sub_port); sni=$(cgw_state_get sni)
+        old=1; legacy_host=$(cgw_state_get host); host=$(cgw_client_host); port=$(cgw_state_get port); sub_port=$(cgw_state_get sub_port); sni=$(cgw_state_get sni)
         sid=$(cgw_state_get short_id); priv=$(cgw_state_get private_key); pub=$(cgw_state_get public_key)
         cur_scheme=$(cgw_state_get sub_scheme); cur_subhost=$(cgw_state_get sub_host); cur_cert=$(cgw_state_get tls_cert); cur_key=$(cgw_state_get tls_key)
-        print_info "Existing gateway detected. Current keys are preserved by default."
+        # v4.0.2 and older used one hostname for both VLESS and Subscription.
+        # Prefer the actual public IP for the VLESS endpoint, while keeping the HTTPS subscription domain separate.
+        if [[ -z "$(cgw_state_get client_host 2>/dev/null || true)" && -n "$detected_ip" && "$detected_ip" != "unknown" ]]; then host="$detected_ip"; fi
+        print_info "Existing gateway detected. Current keys/certificate are preserved by default."
     else
-        host=$(get_public_ip 2>/dev/null || echo unknown); port="$CGW_DEFAULT_PORT"; sub_port="$CGW_DEFAULT_SUB_PORT"; sni="www.speedtest.net"
+        host="${detected_ip:-unknown}"; port="$CGW_DEFAULT_PORT"; sub_port="$CGW_DEFAULT_SUB_PORT"; sni="www.speedtest.net"
         cur_scheme=""; cur_subhost=""; cur_cert=""; cur_key=""
     fi
-    ask host "  Iran public IP/domain for client links" "$host"
+    ask host "  VLESS client endpoint (public IP recommended)" "$host"
     ask port "  VLESS Reality TCP port" "$port"; valid_port "$port" || { print_error "Invalid port."; press_enter; return 1; }
     ask sub_port "  Subscription port" "$sub_port"; valid_port "$sub_port" || { print_error "Invalid subscription port."; press_enter; return 1; }
     ask sni "  Reality camouflage SNI" "$sni"
-    cgw_configure_subscription_tls "$host" "$cur_scheme" "$cur_subhost" "$cur_cert" "$cur_key" || { print_error "Subscription security setup failed."; press_enter; return 1; }
+    if cgw_probe_reality_sni "$sni"; then
+        print_success "REALITY target responds to TLS from this Iran server: ${sni}:443"
+    else
+        print_warn "REALITY target ${sni}:443 did not complete a TLS certificate handshake from this server."
+        confirm "Continue with this SNI anyway?" n || { print_info "Re-run Setup and choose a reachable TLS target."; press_enter; return 1; }
+    fi
+    cgw_configure_subscription_tls "${cur_subhost:-$host}" "$cur_scheme" "$cur_subhost" "$cur_cert" "$cur_key" || { print_error "Subscription security setup failed."; press_enter; return 1; }
 
     if ((old)) && [[ -n "$priv" && -n "$pub" && -n "$sid" ]]; then
         keep_keys=y; confirm "Keep existing Reality key pair (recommended)?" y || keep_keys=n
@@ -495,7 +538,7 @@ cgw_setup(){
     mkdir -p "$CGW_DIR"
     HOST="$host" PORT="$port" SUB="$sub_port" SNI="$sni" SID="$sid" PRIV="$priv" PUB="$pub" SUBSCHEME="$CGW_TLS_SCHEME" SUBHOST="$CGW_TLS_HOST" TLSCERT="$CGW_TLS_CERT" TLSKEY="$CGW_TLS_KEY" python3 - <<'PY'
 import json,os
-s={'host':os.environ['HOST'],'port':int(os.environ['PORT']),'sub_port':int(os.environ['SUB']),'sni':os.environ['SNI'],'short_id':os.environ['SID'],'private_key':os.environ['PRIV'],'public_key':os.environ['PUB'],'exit_socks_port':10808,'stats_port':10085,'sub_scheme':os.environ.get('SUBSCHEME','http'),'sub_host':os.environ.get('SUBHOST') or os.environ['HOST'],'tls_cert':os.environ.get('TLSCERT',''),'tls_key':os.environ.get('TLSKEY','')}
+s={'client_host':os.environ['HOST'],'host':os.environ['HOST'],'port':int(os.environ['PORT']),'sub_port':int(os.environ['SUB']),'sni':os.environ['SNI'],'short_id':os.environ['SID'],'private_key':os.environ['PRIV'],'public_key':os.environ['PUB'],'exit_socks_port':10808,'stats_port':10085,'sub_scheme':os.environ.get('SUBSCHEME','http'),'sub_host':os.environ.get('SUBHOST') or os.environ['HOST'],'tls_cert':os.environ.get('TLSCERT',''),'tls_key':os.environ.get('TLSKEY','')}
 with open('/etc/customer-gateway/gateway.json','w') as f:json.dump(s,f,indent=2)
 os.chmod('/etc/customer-gateway/gateway.json',0o600)
 PY
@@ -529,7 +572,7 @@ HOOK
     fi
     print_success "Subscription endpoint self-test passed."
     print_success "Customer gateway is ready."
-    echo -e "  Client endpoint : ${CYAN}${host}:${port}${NC}"
+    echo -e "  Client endpoint : ${CYAN}${host}:${port}${NC} ${DIM}(subscription domain may be different)${NC}"
     echo -e "  Subscription    : ${CYAN}${CGW_TLS_SCHEME}://${CGW_TLS_HOST}:${sub_port}/sub/<user-token>${NC}"
     echo -e "  Turkey exit IP  : ${CYAN}${exit_ip}${NC}\n"
     print_info "Create users from User Management. Each user gets an individual quota, expiry and subscription URL."
@@ -540,8 +583,17 @@ HOOK
 cgw_upgrade_runtime(){
     print_banner; print_header "Upgrade / Repair Customer Gateway"
     cgw_installed || { print_error "Customer Gateway is not configured yet."; press_enter; return 1; }
-    local port sub_port scheme rc rt
+    local port sub_port scheme rc rt detected_ip existing_client
     port=$(cgw_state_get port); sub_port=$(cgw_state_get sub_port); scheme=$(cgw_state_get sub_scheme); [[ -n "$scheme" ]] || scheme=http
+    existing_client=$(cgw_state_get client_host 2>/dev/null || true)
+    if [[ -z "$existing_client" ]]; then
+        detected_ip=$(get_public_ip 2>/dev/null || true)
+        if [[ -n "$detected_ip" && "$detected_ip" != "unknown" ]]; then
+            cgw_state_set client_host "$detected_ip" || true
+            print_info "Migrated VLESS client endpoint to detected public IP: $detected_ip"
+            print_info "Subscription HTTPS domain remains unchanged: $(cgw_state_get sub_host)"
+        fi
+    fi
     xray_ensure || { press_enter; return 1; }
     ensure_packages python3 openssl cron iptables ca-certificates || { press_enter; return 1; }
     db_init || { press_enter; return 1; }
@@ -572,7 +624,7 @@ cgw_status(){
     service_status_line "$CGW_SERVICE" "Customer VLESS gateway"; service_status_line "$CGW_SUB_SERVICE" "Subscription service"; service_status_line customer-gateway-watchdog.timer "Kill-switch watchdog"
     local exit; exit=$(rssh_test_socks 10808 10 || true); echo -e "  Turkey exit             : ${CYAN}${exit:-FAILED}${NC}"
     if [[ -s "$CGW_STATE" ]]; then
-        echo -e "  Client endpoint         : ${CYAN}$(cgw_state_get host):$(cgw_state_get port)${NC}"
+        echo -e "  Client endpoint         : ${CYAN}$(cgw_client_host):$(cgw_state_get port)${NC}"
         echo -e "  Subscription endpoint   : ${CYAN}$(cgw_state_get sub_scheme)://$(cgw_state_get sub_host):$(cgw_state_get sub_port)${NC}"
     fi
     press_enter

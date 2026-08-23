@@ -20,7 +20,7 @@ overall_health(){
     exit=$(rssh_test_socks 10808 10 || true)
     [[ -n "$exit" ]] && print_success "End-to-end Turkey exit works: $exit" || print_warn "No verified Turkey exit on 127.0.0.1:10808."
     if [[ -s "$CGW_STATE" ]]; then
-        echo -e "  Client endpoint         : ${CYAN}$(cgw_state_get host):$(cgw_state_get port)${NC}"
+        echo -e "  Client endpoint         : ${CYAN}$(cgw_client_host):$(cgw_state_get port)${NC}"
         echo -e "  Subscription endpoint   : ${CYAN}$(cgw_state_get sub_scheme)://$(cgw_state_get sub_host):$(cgw_state_get sub_port)/sub/<token>${NC}"
         echo -e "  Minimum client core     : ${CYAN}Xray 26.3.27+${NC}"
         if ss -H -ltn 2>/dev/null | grep -qE ":$(cgw_state_get port)[[:space:]]"; then print_success "Customer port is listening locally: $(cgw_state_get port)/tcp"; else print_warn "Customer port is NOT listening locally: $(cgw_state_get port)/tcp"; fi
@@ -31,7 +31,7 @@ overall_health(){
           4) print_info "VLESS/REALITY self-test skipped: no active customer." ;;
           *) print_warn "VLESS/REALITY self-test failed: $rt" ;;
         esac
-        echo -e "  ${DIM}External port check (Windows PowerShell): Test-NetConnection $(cgw_state_get host) -Port $(cgw_state_get port)${NC}"
+        echo -e "  ${DIM}External port check (Windows PowerShell): Test-NetConnection $(cgw_client_host) -Port $(cgw_state_get port)${NC}"
     fi
 }
 

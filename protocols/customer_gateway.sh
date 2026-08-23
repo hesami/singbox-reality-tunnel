@@ -49,7 +49,7 @@ cgw_build_link() {
 import json, os, urllib.parse
 s=json.load(open(os.environ['STATE']))
 label=urllib.parse.quote(os.environ['LABEL'], safe='')
-q={'encryption':'none','security':'reality','sni':s['sni'],'fp':'chrome','pbk':s['public_key'],'sid':s['short_id'],'type':'tcp'}
+q={'encryption':'none','security':'reality','sni':s['sni'],'fp':'chrome','pbk':s['public_key'],'sid':s['short_id'],'type':'tcp','headerType':'none','spx':'/'}
 print(f"vless://{os.environ['UUID']}@{s['host']}:{s['port']}?{urllib.parse.urlencode(q)}#{label}")
 PY
 }
@@ -91,7 +91,7 @@ config={
  'api':{'tag':'api','listen':'127.0.0.1:10085','services':['StatsService']},
  'inbounds':[
   {'listen':'0.0.0.0','port':int(state['port']),'protocol':'vless','tag':'customer-in','settings':{'users':users,'decryption':'none'},
-   'streamSettings':{'method':'raw','security':'reality','realitySettings':{'show':False,'target':state['sni']+':443','xver':0,'serverNames':[state['sni']],'privateKey':state['private_key'],'shortIds':[state['short_id']]}}}
+   'streamSettings':{'method':'raw','security':'reality','realitySettings':{'show':False,'target':state['sni']+':443','xver':0,'serverNames':[state['sni']],'privateKey':state['private_key'],'minClientVer':'26.3.27','shortIds':[state['short_id']]}}}
  ],
  'outbounds':[
   {'protocol':'socks','tag':'turkey-exit','settings':{'address':'127.0.0.1','port':int(state['exit_socks_port'])}},
@@ -171,7 +171,7 @@ PY
 cgw_write_subscription_server(){
 cat >"$CGW_SUB_SERVER" <<'SUBPY'
 #!/usr/bin/env python3
-import base64,json,sqlite3,urllib.parse,ssl,time,threading
+import base64,json,sqlite3,urllib.parse,ssl,time,threading,traceback
 from collections import defaultdict,deque
 from datetime import datetime,timezone
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -200,7 +200,7 @@ def active(r):
  if q>0 and int(r['used_bytes'] or 0)>=int(q*1024**3):return False,'quota exceeded'
  return True,''
 def link(r,st):
- q={'encryption':'none','security':'reality','sni':st['sni'],'fp':'chrome','pbk':st['public_key'],'sid':st['short_id'],'type':'tcp'}
+ q={'encryption':'none','security':'reality','sni':st['sni'],'fp':'chrome','pbk':st['public_key'],'sid':st['short_id'],'type':'tcp','headerType':'none','spx':'/'}
  return f"vless://{r['uuid']}@{st['host']}:{st['port']}?{urllib.parse.urlencode(q)}#{urllib.parse.quote(r['label'] or 'User',safe='')}"
 class H(BaseHTTPRequestHandler):
  server_version='Subscription/1.1'
@@ -209,18 +209,28 @@ class H(BaseHTTPRequestHandler):
   self.send_response(c);self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
  def do_GET(self):
   ip=self.client_address[0]
-  if not throttle(ip):return self.out(429,b'Too Many Requests')
-  if not self.path.startswith('/sub/'):return self.out(404,b'Not Found')
-  tok=self.path.split('/sub/',1)[1].split('?',1)[0].strip('/');c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;r=c.execute('SELECT * FROM users WHERE sub_token=?',(tok,)).fetchone();c.close()
-  if not r: throttle(ip,True);logbad(ip,tok);return self.out(401,b'Unauthorized')
-  ok,why=active(r)
-  if not ok:return self.out(403,why.encode())
-  st=json.load(open(STATE));body=base64.b64encode((link(r,st)+'\n').encode());used=int(r['used_bytes'] or 0);total=int(float(r['quota_gb'] or 0)*1024**3);info=f'upload={used}; download=0; total={total}'
-  if r['expires_at']:
+  try:
+   if not throttle(ip):return self.out(429,b'Too Many Requests')
+   if not self.path.startswith('/sub/'):return self.out(404,b'Not Found')
+   tok=self.path.split('/sub/',1)[1].split('?',1)[0].strip('/')
+   c=sqlite3.connect(DB);c.row_factory=sqlite3.Row
+   try:r=c.execute('SELECT * FROM users WHERE sub_token=?',(tok,)).fetchone()
+   finally:c.close()
+   if not r: throttle(ip,True);logbad(ip,tok);return self.out(401,b'Unauthorized')
+   ok,why=active(r)
+   if not ok:return self.out(403,why.encode())
+   st=json.load(open(STATE));body=base64.b64encode((link(r,st)+'\n').encode());used=int(r['used_bytes'] or 0);total=int(float(r['quota_gb'] or 0)*1024**3);info=f'upload={used}; download=0; total={total}'
+   if r['expires_at']:
+    try:
+     d=datetime.fromisoformat(r['expires_at']);d=d if d.tzinfo else d.replace(tzinfo=timezone.utc);info+=f'; expire={int(d.timestamp())}'
+    except:pass
+   self.send_response(200);self.send_header('Content-Type','text/plain; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('subscription-userinfo',info);self.send_header('X-Content-Type-Options','nosniff');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+  except Exception as e:
    try:
-    d=datetime.fromisoformat(r['expires_at']);d=d if d.tzinfo else d.replace(tzinfo=timezone.utc);info+=f'; expire={int(d.timestamp())}'
+    with open(LOG,'a') as f:f.write(f'ERROR {ip} {type(e).__name__}: {e}\n{traceback.format_exc()}\n')
    except:pass
-  self.send_response(200);self.send_header('Content-Type','text/plain; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('subscription-userinfo',info);self.send_header('X-Content-Type-Options','nosniff');self.send_header('Referrer-Policy','no-referrer');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+   try:self.out(500,b'Internal Server Error')
+   except:pass
 st=json.load(open(STATE));srv=ThreadingHTTPServer(('0.0.0.0',int(st['sub_port'])),H)
 if st.get('sub_scheme')=='https':
  ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.minimum_version=ssl.TLSVersion.TLSv1_2;ctx.load_cert_chain(st['tls_cert'],st['tls_key']);srv.socket=ctx.wrap_socket(srv.socket,server_side=True)
@@ -260,7 +270,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/log
+ReadWritePaths=/var/log /etc/singbox-manager/data
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -360,6 +370,80 @@ cgw_restore_latest(){
     [[ -x "$CGW_REBUILD" ]] && "$CGW_REBUILD" --force >/dev/null 2>&1 || true
     systemctl restart "$CGW_SUB_SERVICE" >/dev/null 2>&1 || true; print_success "Restored: $f"
 }
+cgw_pick_test_user(){
+    [[ -f "$DB_PATH" ]] || return 1
+    DB_PATH="$DB_PATH" python3 - <<'PY'
+import json,sqlite3,os
+from datetime import datetime,timezone
+c=sqlite3.connect(os.environ['DB_PATH']); c.row_factory=sqlite3.Row
+for r in c.execute('SELECT * FROM users ORDER BY created_at DESC'):
+    if int(r['enabled'] or 0)!=1: continue
+    try: e=json.loads(r['engines'] or '{}')
+    except: e={}
+    if not e.get('gateway'): continue
+    if r['expires_at']:
+        try:
+            d=datetime.fromisoformat(r['expires_at']); d=d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc)>=d: continue
+        except: pass
+    q=float(r['quota_gb'] or 0)
+    if q>0 and int(r['used_bytes'] or 0)>=int(q*1024**3): continue
+    print(r['uuid']); break
+c.close()
+PY
+}
+
+cgw_local_client_test(){
+    cgw_installed || { echo "GATEWAY_NOT_CONFIGURED"; return 2; }
+    systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null || { echo "GATEWAY_NOT_RUNNING"; return 3; }
+    local uuid state_port sni pub sid test_port tmp log pid out expected i
+    uuid=$(cgw_pick_test_user 2>/dev/null || true)
+    [[ -n "$uuid" ]] || { echo "NO_ACTIVE_USER"; return 4; }
+    state_port=$(cgw_state_get port); sni=$(cgw_state_get sni); pub=$(cgw_state_get public_key); sid=$(cgw_state_get short_id)
+    expected=$(rssh_test_socks 10808 12 || true)
+    [[ -n "$expected" ]] || { echo "TURKEY_SOCKS_FAILED"; return 5; }
+    test_port=19081
+    for i in $(seq 19081 19120); do
+        if ! ss -H -ltn 2>/dev/null | awk -v p=":$i" '$4 ~ p"$"{f=1}END{exit !f}'; then test_port=$i; break; fi
+    done
+    tmp=$(mktemp --suffix=.json); log=$(mktemp)
+    UUID="$uuid" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" python3 - "$tmp" <<'PY'
+import json,os,sys
+cfg={
+ 'log':{'loglevel':'warning'},
+ 'inbounds':[{'listen':'127.0.0.1','port':int(os.environ['LPORT']),'protocol':'socks','settings':{'auth':'noauth','udp':False}}],
+ 'outbounds':[{
+   'tag':'proxy','protocol':'vless',
+   'settings':{'address':'127.0.0.1','port':int(os.environ['PORT']),'id':os.environ['UUID'],'encryption':'none'},
+   'streamSettings':{'method':'raw','security':'reality','realitySettings':{
+      'serverName':os.environ['SNI'],'fingerprint':'chrome','password':os.environ['PUB'],'shortId':os.environ['SID']
+   }}
+ }]
+}
+with open(sys.argv[1],'w') as f: json.dump(cfg,f)
+PY
+    "$XRAY_BIN" run -test -config "$tmp" >"$log" 2>&1 || { cat "$log"; rm -f "$tmp" "$log"; return 6; }
+    "$XRAY_BIN" run -config "$tmp" >"$log" 2>&1 & pid=$!
+    for i in 1 2 3 4 5; do
+        sleep 0.4
+        ss -H -ltn 2>/dev/null | awk -v p=":$test_port" '$4 ~ p"$"{f=1}END{exit !f}' && break
+    done
+    out=$(curl -fsS --connect-timeout 5 --max-time 15 --socks5-hostname "127.0.0.1:${test_port}" https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)
+    kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true
+    if [[ -n "$out" && "$out" == "$expected" ]]; then rm -f "$tmp" "$log"; echo "$out"; return 0; fi
+    echo "LOCAL_REALITY_FAILED expected=${expected:-?} got=${out:-none}"
+    sed -n '1,80p' "$log" | sed 's/^/XRAY_CLIENT: /'
+    rm -f "$tmp" "$log"; return 7
+}
+
+cgw_reality_target_test(){
+    local sni out
+    sni=$(cgw_state_get sni 2>/dev/null || true); [[ -n "$sni" ]] || return 1
+    out=$(timeout 10 "$XRAY_BIN" tls ping "$sni" 2>&1 || true)
+    if printf '%s' "$out" | grep -qiE 'TLS|certificate|handshake|X25519|MLKEM'; then return 0; fi
+    timeout 8 openssl s_client -connect "${sni}:443" -servername "$sni" </dev/null >/dev/null 2>&1
+}
+
 cgw_security_audit(){
     local scheme host port exit
     scheme=$(cgw_state_get sub_scheme 2>/dev/null || echo http); host=$(cgw_state_get sub_host 2>/dev/null || true); port=$(cgw_state_get sub_port 2>/dev/null || true)
@@ -369,6 +453,12 @@ cgw_security_audit(){
     systemctl is-active --quiet customer-gateway-watchdog.timer 2>/dev/null && print_success "Kill-switch watchdog active." || print_warn "Kill-switch watchdog inactive."
     systemctl is-active --quiet fail2ban 2>/dev/null && print_success "Fail2ban active." || print_warn "Fail2ban inactive."
     exit=$(rssh_test_socks 10808 10 || true); [[ -n "$exit" ]] && print_success "Turkey egress healthy: $exit" || print_error "Turkey egress failed."
+    if cgw_reality_target_test; then print_success "REALITY camouflage target is reachable from Iran."; else print_warn "REALITY camouflage target may be unreachable from Iran."; fi
+    local rt; rt=$(cgw_local_client_test 2>&1); case $? in
+      0) print_success "Local VLESS/REALITY → Turkey path works: $rt" ;;
+      4) print_info "Local VLESS/REALITY test skipped: create an active customer first." ;;
+      *) print_warn "Local VLESS/REALITY path test failed: $rt" ;;
+    esac
 }
 
 cgw_setup(){
@@ -430,11 +520,50 @@ HOOK
     cgw_install_cron; open_port "$port" tcp; open_port "$sub_port" tcp; cgw_install_sub_fail2ban; sleep 1
     systemctl is-active --quiet "$CGW_SERVICE" || { print_error "Customer gateway failed to start."; journalctl -u "$CGW_SERVICE" -n 30 --no-pager | sed 's/^/  /'; press_enter; return 1; }
     systemctl is-active --quiet "$CGW_SUB_SERVICE" || { print_error "Subscription service failed to start."; journalctl -u "$CGW_SUB_SERVICE" -n 20 --no-pager | sed 's/^/  /'; press_enter; return 1; }
+    local sub_probe_code
+    sub_probe_code=$(curl -ksS --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' "${CGW_TLS_SCHEME}://127.0.0.1:${sub_port}/sub/__gateway_health_probe__" 2>/dev/null || true)
+    if [[ "$sub_probe_code" != "401" ]]; then
+        print_error "Subscription self-test failed (HTTP ${sub_probe_code:-no-response})."
+        journalctl -u "$CGW_SUB_SERVICE" -n 30 --no-pager | sed 's/^/  /'
+        press_enter; return 1
+    fi
+    print_success "Subscription endpoint self-test passed."
     print_success "Customer gateway is ready."
     echo -e "  Client endpoint : ${CYAN}${host}:${port}${NC}"
     echo -e "  Subscription    : ${CYAN}${CGW_TLS_SCHEME}://${CGW_TLS_HOST}:${sub_port}/sub/<user-token>${NC}"
     echo -e "  Turkey exit IP  : ${CYAN}${exit_ip}${NC}\n"
     print_info "Create users from User Management. Each user gets an individual quota, expiry and subscription URL."
+    print_info "Client requirement: v2rayN should use Xray-core 26.3.27 or newer for this REALITY profile."
+    press_enter
+}
+
+cgw_upgrade_runtime(){
+    print_banner; print_header "Upgrade / Repair Customer Gateway"
+    cgw_installed || { print_error "Customer Gateway is not configured yet."; press_enter; return 1; }
+    local port sub_port scheme rc rt
+    port=$(cgw_state_get port); sub_port=$(cgw_state_get sub_port); scheme=$(cgw_state_get sub_scheme); [[ -n "$scheme" ]] || scheme=http
+    xray_ensure || { press_enter; return 1; }
+    ensure_packages python3 openssl cron iptables ca-certificates || { press_enter; return 1; }
+    db_init || { press_enter; return 1; }
+    print_info "Refreshing generated runtime files while preserving users, Reality keys, certificate and endpoints..."
+    cgw_write_rebuild_script
+    cgw_write_sync_script
+    cgw_write_subscription_server
+    cgw_create_services
+    "$CGW_REBUILD" --force || { print_error "Gateway rebuild failed."; press_enter; return 1; }
+    systemctl restart "$CGW_SUB_SERVICE" >/dev/null 2>&1 || true
+    cgw_install_cron
+    open_port "$port" tcp; open_port "$sub_port" tcp
+    cgw_install_sub_fail2ban
+    sleep 1
+    systemctl is-active --quiet "$CGW_SERVICE" || { print_error "Customer gateway is not running."; press_enter; return 1; }
+    systemctl is-active --quiet "$CGW_SUB_SERVICE" || { print_error "Subscription service is not running."; press_enter; return 1; }
+    local code
+    code=$(curl -ksS --connect-timeout 3 --max-time 6 -o /dev/null -w '%{http_code}' "${scheme}://127.0.0.1:${sub_port}/sub/__gateway_health_probe__" 2>/dev/null || true)
+    [[ "$code" == 401 ]] && print_success "Subscription runtime self-test passed." || print_warn "Subscription runtime returned HTTP ${code:-no-response}."
+    rt=$(cgw_local_client_test 2>&1); rc=$?
+    if ((rc==0)); then print_success "VLESS/REALITY → Turkey self-test passed: $rt"; elif ((rc==4)); then print_info "Client-path self-test skipped: no active customer."; else print_warn "Client-path self-test failed: $rt"; fi
+    print_success "Runtime upgrade/repair completed without changing customer credentials or TLS certificate."
     press_enter
 }
 
@@ -459,10 +588,11 @@ cgw_menu(){
     while true; do
         print_banner; print_header "Customer Gateway"
         echo -e "  ${CYAN}1)${NC} Setup / reconfigure ${DIM}(preserves Reality keys by default)${NC}"
-        echo -e "  ${CYAN}2)${NC} Status / health check"
-        echo -e "  ${CYAN}3)${NC} Security audit"
-        echo -e "  ${CYAN}4)${NC} Remove gateway"
+        echo -e "  ${CYAN}2)${NC} Upgrade / repair runtime ${DIM}(no key/certificate changes)${NC}"
+        echo -e "  ${CYAN}3)${NC} Status / health check"
+        echo -e "  ${CYAN}4)${NC} Security audit"
+        echo -e "  ${CYAN}5)${NC} Remove gateway"
         echo -e "  ${CYAN}0)${NC} Back"; menu_prompt
-        case "$MENU_CHOICE" in 1)cgw_setup;;2)cgw_status;;3)print_banner;print_header "Gateway Security Audit";cgw_security_audit;press_enter;;4)cgw_remove;;0)return;;*)print_warn "Invalid choice.";sleep 1;;esac
+        case "$MENU_CHOICE" in 1)cgw_setup;;2)cgw_upgrade_runtime;;3)cgw_status;;4)print_banner;print_header "Gateway Security Audit";cgw_security_audit;press_enter;;5)cgw_remove;;0)return;;*)print_warn "Invalid choice.";sleep 1;;esac
     done
 }

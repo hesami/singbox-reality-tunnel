@@ -1,4 +1,19 @@
-# Iran ↔ Turkey Gateway Manager — v4.0.0 Minimal Production Edition
+# v4.0.2 — Client Path Diagnostics + Subscription Fix
+
+- Permanently includes the SQLite/WAL systemd permission fix for HTTPS/HTTP subscriptions.
+- Adds a local end-to-end Xray client self-test: VLESS/REALITY -> Iran gateway -> reverse-SSH SOCKS -> foreign exit.
+- Adds REALITY camouflage-target reachability checks.
+- Pins REALITY `minClientVer` to Xray 26.3.27 for deterministic compatibility; v2rayN should use Xray-core 26.3.27 or newer.
+- Adds `headerType=none` and `spx=/` to generated VLESS share links for broader v2rayN parser compatibility.
+- System Health now distinguishes server-side path failures from external port/client problems.
+- Adds a non-destructive `Upgrade / repair runtime` action that refreshes generated services/scripts without changing keys, users, endpoints, or certificates.
+
+# Iran ↔ Turkey Gateway Manager — v4.0.1 Minimal Production Edition
+
+## v4.0.1 HTTPS subscription fix
+
+The hardened subscription service now grants its systemd sandbox write access only to `/etc/singbox-manager/data` (required by SQLite WAL/SHM), returns/logs HTTP 500 instead of silently closing a request on internal errors, and performs a local subscription self-test during gateway setup.
+
 
 This edition intentionally removes experimental transports that were not useful for the validated deployment. It keeps one production architecture:
 
@@ -96,7 +111,7 @@ The user database remains at:
 
 `/etc/singbox-manager/data/users.db`
 
-Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.0, use:
+Existing customer records are retained. Old experimental services are **not automatically removed**. After verifying v4.0.1, use:
 
 `Maintenance` → `Cleanup legacy experimental components`
 

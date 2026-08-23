@@ -535,7 +535,7 @@ PYTCP
 cgw_local_client_test(){
     cgw_installed || { echo "GATEWAY_NOT_CONFIGURED"; return 2; }
     systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null || { echo "GATEWAY_NOT_RUNNING"; return 3; }
-    local uuid state_port client_host sni pub sid test_port tmp log pid out expected i err_start access_start exit_port tcp_probe
+    local uuid state_port client_host sni pub sid test_port relay_port tmp log relay_log pid relay_pid out expected i err_start access_start exit_port tcp_probe trace
     exit_port=$(cgw_exit_port)
     uuid=$(cgw_pick_test_user 2>/dev/null || true)
     [[ -n "$uuid" ]] || { echo "NO_ACTIVE_USER"; return 4; }
@@ -543,9 +543,8 @@ cgw_local_client_test(){
     client_host=$(cgw_client_host)
     sni=$(cgw_state_get sni); pub=$(cgw_state_get public_key); sid=$(cgw_state_get short_id)
 
-    # Prove the reverse SOCKS first. Then dial the public customer endpoint THROUGH
-    # that SOCKS so the probe exits from the foreign server and re-enters Iran like
-    # a real remote client. This avoids false negatives from same-host loopback.
+    # First prove that the Turkey reverse SOCKS works and that the public Iran
+    # endpoint is reachable from that foreign exit.
     expected=$(rssh_test_socks "$exit_port" 12 || true)
     [[ -n "$expected" ]] || { echo "FOREIGN_SOCKS_FAILED"; return 5; }
     [[ -n "$client_host" ]] || { echo "CLIENT_ENDPOINT_MISSING"; return 6; }
@@ -555,16 +554,116 @@ cgw_local_client_test(){
     }
     echo "EXTERNAL_ENDPOINT_REACHABLE endpoint=${client_host}:${state_port} via_foreign_exit=${expected}"
 
+    # Do NOT use Xray sockopt.dialerProxy for this verification. REALITY inside
+    # an Xray proxy-chain can fail independently of a normal direct client and
+    # produces false negatives. Instead, create a tiny local TCP relay whose
+    # upstream connection is opened through the Turkey SOCKS5 proxy. Xray then
+    # sees an ordinary direct TCP socket while the bytes physically leave from
+    # Turkey and re-enter the public Iran endpoint.
     test_port=19081
     for i in $(seq 19081 19120); do
         if ! ss -H -ltn 2>/dev/null | awk -v p=":$i" '$4 ~ p"$"{f=1}END{exit !f}'; then test_port=$i; break; fi
     done
     ss -H -ltn 2>/dev/null | awk -v p=":$test_port" '$4 ~ p"$"{f=1}END{exit f}' || { echo "NO_FREE_TEST_PORT"; return 6; }
-    tmp=$(mktemp --suffix=.json); log=$(mktemp)
+
+    relay_port=19121
+    for i in $(seq 19121 19160); do
+        if ! ss -H -ltn 2>/dev/null | awk -v p=":$i" '$4 ~ p"$"{f=1}END{exit !f}'; then relay_port=$i; break; fi
+    done
+    ss -H -ltn 2>/dev/null | awk -v p=":$relay_port" '$4 ~ p"$"{f=1}END{exit f}' || { echo "NO_FREE_RELAY_PORT"; return 6; }
+
+    tmp=$(mktemp --suffix=.json); log=$(mktemp); relay_log=$(mktemp)
     err_start=$(wc -l </var/log/customer-gateway-error.log 2>/dev/null || echo 0)
     access_start=$(wc -l </var/log/customer-gateway-access.log 2>/dev/null || echo 0)
 
-    UUID="$uuid" HOST="$client_host" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" EXITPORT="$exit_port" python3 - "$tmp" <<'PYTEST'
+    RELAY_PORT="$relay_port" EXITPORT="$exit_port" TARGET_HOST="$client_host" TARGET_PORT="$state_port" python3 - <<'PYRELAY' >"$relay_log" 2>&1 &
+import os, socket, struct, threading, select
+listen_port=int(os.environ['RELAY_PORT'])
+socks_port=int(os.environ['EXITPORT'])
+target_host=os.environ['TARGET_HOST']
+target_port=int(os.environ['TARGET_PORT'])
+
+def recvn(s,n):
+    b=b''
+    while len(b)<n:
+        x=s.recv(n-len(b))
+        if not x: raise OSError('unexpected EOF')
+        b+=x
+    return b
+
+def upstream():
+    s=socket.create_connection(('127.0.0.1',socks_port),timeout=8)
+    s.settimeout(8)
+    s.sendall(b'\x05\x01\x00')
+    if recvn(s,2)!=b'\x05\x00': raise OSError('SOCKS5 negotiation failed')
+    try:
+        addr=b'\x01'+socket.inet_pton(socket.AF_INET,target_host)
+    except OSError:
+        try: addr=b'\x04'+socket.inet_pton(socket.AF_INET6,target_host)
+        except OSError:
+            h=target_host.encode('idna')
+            if not h or len(h)>255: raise OSError('invalid target hostname')
+            addr=b'\x03'+bytes([len(h)])+h
+    s.sendall(b'\x05\x01\x00'+addr+struct.pack('!H',target_port))
+    h=recvn(s,4)
+    if h[0]!=5 or h[1]!=0: raise OSError('SOCKS5 CONNECT failed reply='+str(h[1] if len(h)>1 else -1))
+    atyp=h[3]
+    if atyp==1: recvn(s,4)
+    elif atyp==3: recvn(s,recvn(s,1)[0])
+    elif atyp==4: recvn(s,16)
+    else: raise OSError('invalid SOCKS5 reply address')
+    recvn(s,2)
+    s.settimeout(None)
+    return s
+
+def pump(a,b):
+    try:
+        while True:
+            r,_,_=select.select([a,b],[],[],30)
+            if not r: continue
+            for src in r:
+                data=src.recv(65536)
+                if not data: return
+                (b if src is a else a).sendall(data)
+    except Exception:
+        pass
+    finally:
+        try:a.close()
+        except:pass
+        try:b.close()
+        except:pass
+
+def handle(c):
+    try:
+        u=upstream()
+    except Exception as e:
+        print(type(e).__name__+': '+str(e),flush=True)
+        try:c.close()
+        except:pass
+        return
+    pump(c,u)
+
+ls=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+ls.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+ls.bind(('127.0.0.1',listen_port)); ls.listen(16)
+while True:
+    c,_=ls.accept()
+    threading.Thread(target=handle,args=(c,),daemon=True).start()
+PYRELAY
+    relay_pid=$!
+    for i in 1 2 3 4 5 6 7 8; do
+        sleep 0.2
+        ss -H -ltn 2>/dev/null | awk -v p=":$relay_port" '$4 ~ p"$"{f=1}END{exit !f}' && break
+    done
+    if ! kill -0 "$relay_pid" 2>/dev/null || ! ss -H -ltn 2>/dev/null | awk -v p=":$relay_port" '$4 ~ p"$"{f=1}END{exit !f}'; then
+        echo "EXTERNAL_RELAY_FAILED"
+        sed -n '1,80p' "$relay_log" | sed 's/^/RELAY: /'
+        kill "$relay_pid" >/dev/null 2>&1 || true; wait "$relay_pid" 2>/dev/null || true
+        rm -f "$tmp" "$log" "$relay_log"
+        return 6
+    fi
+
+    UUID="$uuid" PORT="$relay_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" python3 - "$tmp" <<'PYTEST'
 import json,os,sys
 cfg={
  'log':{'loglevel':'debug'},
@@ -572,41 +671,47 @@ cfg={
  'outbounds':[
   {
    'tag':'proxy','protocol':'vless',
-   'settings':{'vnext':[{'address':os.environ['HOST'],'port':int(os.environ['PORT']),'users':[{'id':os.environ['UUID'],'encryption':'none'}]}]},
+   'settings':{'vnext':[{'address':'127.0.0.1','port':int(os.environ['PORT']),'users':[{'id':os.environ['UUID'],'encryption':'none'}]}]},
    'streamSettings':{
       'network':'tcp',
       'security':'reality',
       'realitySettings':{
         'serverName':os.environ['SNI'],
         'fingerprint':'chrome',
-        'publicKey':os.environ['PUB'],
         'password':os.environ['PUB'],
         'shortId':os.environ['SID'],
         'spiderX':'/'
-      },
-      'sockopt':{'dialerProxy':'foreign-hop'}
+      }
    },
    'targetStrategy':'UseIPv4'
-  },
-  {'tag':'foreign-hop','protocol':'socks','settings':{'servers':[{'address':'127.0.0.1','port':int(os.environ['EXITPORT'])}]}}
+  }
  ]
 }
 with open(sys.argv[1],'w') as f: json.dump(cfg,f)
 PYTEST
-    "$XRAY_BIN" run -test -config "$tmp" >"$log" 2>&1 || { cat "$log"; rm -f "$tmp" "$log"; return 7; }
+    "$XRAY_BIN" run -test -config "$tmp" >"$log" 2>&1 || {
+        cat "$log"
+        kill "$relay_pid" >/dev/null 2>&1 || true; wait "$relay_pid" 2>/dev/null || true
+        rm -f "$tmp" "$log" "$relay_log"
+        return 7
+    }
     "$XRAY_BIN" run -config "$tmp" >"$log" 2>&1 & pid=$!
     for i in 1 2 3 4 5; do
         sleep 0.4
         ss -H -ltn 2>/dev/null | awk -v p=":$test_port" '$4 ~ p"$"{f=1}END{exit !f}' && break
     done
-    local trace
     trace=$(curl -4kfsS --connect-timeout 6 --max-time 20 --socks5 "127.0.0.1:${test_port}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
     out=$(printf '%s\n' "$trace" | awk -F= '$1=="ip"{print $2;exit}' | tr -d '[:space:]')
     kill "$pid" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true
-    if [[ -n "$out" && "$out" == "$expected" ]]; then rm -f "$tmp" "$log"; echo "$out"; return 0; fi
+    kill "$relay_pid" >/dev/null 2>&1 || true; wait "$relay_pid" 2>/dev/null || true
+    if [[ -n "$out" && "$out" == "$expected" ]]; then rm -f "$tmp" "$log" "$relay_log"; echo "$out"; return 0; fi
 
     echo "EXTERNAL_REALITY_FAILED endpoint=${client_host}:${state_port} expected_exit=${expected:-?} got=${out:-none}"
     sed -n '1,180p' "$log" | sed 's/^/XRAY_CLIENT: /'
+    if [[ -s "$relay_log" ]]; then
+        echo "RELAY_LOG:"
+        sed -n '1,80p' "$relay_log" | sed 's/^/RELAY: /'
+    fi
     if [[ -s /var/log/customer-gateway-error.log ]]; then
         echo "SERVER_ERROR_LOG_NEW:"
         sed -n "$((err_start+1)),\$p" /var/log/customer-gateway-error.log | tail -n 80 | sed 's/^/XRAY_SERVER: /'
@@ -615,7 +720,7 @@ PYTEST
         echo "SERVER_ACCESS_LOG_NEW:"
         sed -n "$((access_start+1)),\$p" /var/log/customer-gateway-access.log | tail -n 60 | sed 's/^/XRAY_SERVER_ACCESS: /'
     fi
-    rm -f "$tmp" "$log"; return 8
+    rm -f "$tmp" "$log" "$relay_log"; return 8
 }
 
 cgw_probe_reality_sni(){

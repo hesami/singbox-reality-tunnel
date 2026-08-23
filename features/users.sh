@@ -42,7 +42,7 @@ _users_client_test_message(){
       5) echo "The Turkey exit connection is temporarily unavailable." ;;
       6) echo "The public customer endpoint is incomplete or the local test could not start." ;;
       7) echo "The public customer endpoint could not be reached from the Turkey side." ;;
-      8) echo "The endpoint is reachable, but the secure VLESS/REALITY connection could not be verified." ;;
+      8) echo "The endpoint is reachable, but the automated VLESS/REALITY verification could not complete." ;;
       *) echo "The customer was created, but the connection could not be verified." ;;
     esac
 }
@@ -78,7 +78,7 @@ _users_quiet_gateway_repair(){
 }
 
 _users_verify_customer_path(){
-    local rt rc choice
+    local rt rc choice repair_attempted=0
     while true; do
         if rt=$(cgw_local_client_test 2>&1); then
             print_success "Connection verified successfully through the Turkey route."
@@ -92,29 +92,51 @@ _users_verify_customer_path(){
         print_warn "$(_users_client_test_message "$rc")"
         print_info "Your customer is saved and no technical error details are shown here."
         print_info "Diagnostic details were saved to ${MANAGER_LOG}."
-        echo
-        echo -e "  ${CYAN}1)${NC} Try automatic repair ${DIM}(recommended)${NC}"
-        echo -e "  ${CYAN}2)${NC} Test the connection again"
-        echo -e "  ${CYAN}3)${NC} Continue and fix it later"
-        echo -ne "  ${YELLOW}Select option [1]: ${NC}"
-        read -r choice; choice="${choice:-1}"
-        case "$choice" in
-          1)
-            print_info "Applying a safe automatic repair..."
-            if _users_quiet_gateway_repair; then
-                print_info "Repair completed. Checking the connection again..."
-            else
-                print_warn "Automatic repair could not be completed. Your customer data was not changed."
-                print_info "You can retry, or continue and use Customer Gateway → Upgrade / repair runtime later."
-            fi
-            ;;
-          2) print_info "Checking the connection again..." ;;
-          3)
-            print_info "Continuing without connection verification. The customer remains active."
-            return 1
-            ;;
-          *) print_warn "Invalid option. Please choose 1, 2 or 3." ;;
-        esac
+
+        # A REALITY verification failure is not repaired by endlessly restarting
+        # the same runtime. Allow one conservative rebuild, then stop offering it.
+        if (( repair_attempted == 0 )); then
+            echo
+            echo -e "  ${CYAN}1)${NC} Rebuild the gateway runtime once"
+            echo -e "  ${CYAN}2)${NC} Test the connection again"
+            echo -e "  ${CYAN}3)${NC} Continue without verification"
+            echo -ne "  ${YELLOW}Select option [3]: ${NC}"
+            read -r choice; choice="${choice:-3}"
+            case "$choice" in
+              1)
+                repair_attempted=1
+                print_info "Rebuilding the gateway runtime without changing customers or Reality keys..."
+                if _users_quiet_gateway_repair; then
+                    print_info "Runtime rebuilt. Running one fresh connection check..."
+                else
+                    print_warn "The runtime rebuild could not be completed. Customer data was not changed."
+                fi
+                ;;
+              2) print_info "Checking the connection again..." ;;
+              3)
+                print_info "Continuing without connection verification. The customer remains active."
+                return 1
+                ;;
+              *) print_warn "Invalid option. Please choose 1, 2 or 3." ;;
+            esac
+        else
+            echo
+            print_warn "The runtime rebuild did not change the test result. Repeating the same repair will not help, so it will not be offered again."
+            print_info "This verification result does not by itself prove that the customer's real v2rayN connection is broken."
+            echo
+            echo -e "  ${CYAN}1)${NC} Test the connection again"
+            echo -e "  ${CYAN}2)${NC} Continue without verification"
+            echo -ne "  ${YELLOW}Select option [2]: ${NC}"
+            read -r choice; choice="${choice:-2}"
+            case "$choice" in
+              1) print_info "Checking the connection again..." ;;
+              2)
+                print_info "Continuing without connection verification. The customer remains active."
+                return 1
+                ;;
+              *) print_warn "Invalid option. Please choose 1 or 2." ;;
+            esac
+        fi
     done
 }
 

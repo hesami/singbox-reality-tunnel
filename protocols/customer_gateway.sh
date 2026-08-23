@@ -13,6 +13,82 @@ CGW_SUB_SERVICE="customer-gateway-sub.service"
 CGW_DEFAULT_PORT="24443"
 CGW_DEFAULT_SUB_PORT="18080"
 
+# ── Domestic (Iran) traffic bypass ──────────────────────────────
+# When enabled, requests whose destination IP is inside Iran's own
+# address space are routed directly off the Iran server instead of
+# through the Turkey relay (faster, and required for Iran-only
+# services that reject foreign-looking source IPs).
+CGW_ASSET_DIR="/usr/local/share/xray"
+CGW_GEOIP_FILE="${CGW_ASSET_DIR}/geoip.dat"
+
+# Downloads + verifies v2fly's official geoip.dat (monthly-refreshed,
+# includes an "ir" country entry). Real sha256sum sidecar is published
+# alongside it, so — unlike Xray's own release assets — this one can
+# be checksummed the straightforward way.
+cgw_ensure_geoip() {
+    mkdir -p "$CGW_ASSET_DIR"
+    local tmp expected actual
+    tmp=$(mktemp -d)
+    curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 \
+        -o "$tmp/geoip.dat" "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" >/dev/null 2>&1 || {
+        rm -rf "$tmp"; print_error "GeoIP database download failed."; return 1;
+    }
+    curl -fL --retry 3 --connect-timeout 15 --max-time 30 \
+        -o "$tmp/geoip.dat.sha256sum" "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat.sha256sum" >/dev/null 2>&1 || {
+        rm -rf "$tmp"; print_error "GeoIP checksum download failed."; return 1;
+    }
+    expected=$(awk '{print tolower($1)}' "$tmp/geoip.dat.sha256sum" | head -1 | tr -d '[:space:]')
+    actual=$(sha256sum "$tmp/geoip.dat" | awk '{print $1}')
+    [[ -n "$expected" && "$actual" == "$expected" ]] || {
+        rm -rf "$tmp"; print_error "GeoIP checksum verification failed."; return 1;
+    }
+    install -m 0644 "$tmp/geoip.dat" "$CGW_GEOIP_FILE"
+    rm -rf "$tmp"
+    print_success "GeoIP database installed/updated (v2fly, monthly release)."
+}
+
+cgw_install_geoip_cron() {
+    ensure_packages cron
+    systemctl enable cron &>/dev/null || true
+    systemctl start  cron &>/dev/null || true
+    local marker="customer-gateway/geoip-refresh"
+    local cron_line
+    cron_line="0 4 1 * * /usr/bin/env bash -c '\
+tmp=\$(mktemp -d); \
+curl -fsL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 -o \"\$tmp/g.dat\" https://github.com/v2fly/geoip/releases/latest/download/geoip.dat && \
+curl -fsL --retry 3 --connect-timeout 15 --max-time 30 -o \"\$tmp/g.sha\" https://github.com/v2fly/geoip/releases/latest/download/geoip.dat.sha256sum && \
+exp=\$(awk \"{print tolower(\\\$1)}\" \"\$tmp/g.sha\" | head -1) && \
+act=\$(sha256sum \"\$tmp/g.dat\" | awk \"{print \\\$1}\") && \
+[ \"\$exp\" = \"\$act\" ] && install -m 0644 \"\$tmp/g.dat\" ${CGW_GEOIP_FILE}; \
+rm -rf \"\$tmp\"' >/dev/null 2>&1 # ${marker}"
+    { crontab -l 2>/dev/null || true; } | { grep -vF "$marker" || true; } > /tmp/geoip_cron.tmp
+    echo "$cron_line" >> /tmp/geoip_cron.tmp
+    if crontab /tmp/geoip_cron.tmp; then
+        rm -f /tmp/geoip_cron.tmp
+        print_success "GeoIP monthly auto-refresh cron installed."
+    else
+        rm -f /tmp/geoip_cron.tmp
+        print_error "Could not install GeoIP refresh cron (is 'cron' installed and running?)."
+    fi
+}
+
+cgw_toggle_bypass_ir() {
+    cgw_installed || { print_error "Set up the Customer Gateway first."; press_enter; return 1; }
+    local cur; cur=$(cgw_state_get bypass_ir 2>/dev/null || true)
+    if [[ "$cur" == "1" ]]; then
+        cgw_state_set bypass_ir 0
+        print_info "Domestic (Iran) bypass disabled. All traffic will route via Turkey again."
+    else
+        [[ -s "$CGW_GEOIP_FILE" ]] || { cgw_ensure_geoip || { press_enter; return 1; }; }
+        cgw_install_geoip_cron
+        cgw_state_set bypass_ir 1
+        print_success "Domestic (Iran) bypass enabled. Iran-IP destinations will exit locally, not via Turkey."
+    fi
+    cgw_rebuild_if_installed
+    print_info "Gateway runtime rebuilt with the new routing rule."
+    press_enter
+}
+
 cgw_installed() { [[ -s "$CGW_STATE" && -f "/etc/systemd/system/${CGW_SERVICE}" ]]; }
 
 cgw_state_get() {
@@ -122,6 +198,7 @@ STATE='/etc/customer-gateway/gateway.json'
 CFG='/etc/customer-gateway/xray.json'
 XRAY='/usr/local/bin/xray'
 SERVICE='customer-gateway.service'
+GEOIP='/usr/local/share/xray/geoip.dat'
 if not os.path.exists(DB) or not os.path.exists(STATE): sys.exit(0)
 state=json.load(open(STATE))
 conn=sqlite3.connect(DB); conn.row_factory=sqlite3.Row
@@ -141,6 +218,14 @@ def active(r):
     if q>0 and int(r['used_bytes'] or 0)>=int(q*1024**3): return False
     return True
 users=[{'id':r['uuid'],'level':0,'email':r['uuid']} for r in rows if active(r)]
+# Domestic (Iran) bypass: only add the geoip:ir rule if the operator has
+# turned it on AND the geoip database is actually present — referencing a
+# missing asset would make Xray refuse to start.
+bypass_ir = str(state.get('bypass_ir','')) == '1' and os.path.exists(GEOIP)
+routing_rules=[]
+if bypass_ir:
+    routing_rules.append({'type':'field','inboundTag':['customer-in'],'ip':['geoip:ir'],'outboundTag':'direct'})
+routing_rules.append({'type':'field','inboundTag':['customer-in'],'outboundTag':'turkey-exit'})
 config={
  'log':{'loglevel':'warning','access':'/var/log/customer-gateway-access.log','error':'/var/log/customer-gateway-error.log'},
  'stats':{},
@@ -154,9 +239,7 @@ config={
   {'protocol':'socks','tag':'turkey-exit','settings':{'address':'127.0.0.1','port':int(state['exit_socks_port'])}},
   {'protocol':'freedom','tag':'direct'}
  ],
- 'routing':{'domainStrategy':'AsIs','rules':[
-  {'type':'field','inboundTag':['customer-in'],'outboundTag':'turkey-exit'}
- ]}
+ 'routing':{'domainStrategy':'AsIs','rules':routing_rules}
 }
 new=json.dumps(config,indent=2,sort_keys=True)+'\n'
 try: old=open(CFG).read()
@@ -166,7 +249,8 @@ tmp=CFG+'.new.json'
 with open(tmp,'w') as f:
     f.write(new)
 os.chmod(tmp,0o600)
-r=subprocess.run([XRAY,'run','-test','-config',tmp],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+test_env=dict(os.environ, XRAY_LOCATION_ASSET='/usr/local/share/xray')
+r=subprocess.run([XRAY,'run','-test','-config',tmp],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,env=test_env)
 if r.returncode!=0:
     print(r.stdout,file=sys.stderr)
     try: os.unlink(tmp)
@@ -310,6 +394,7 @@ After=network-online.target
 [Service]
 Type=simple
 UMask=0077
+Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
 ExecStart=/usr/local/bin/xray run -config /etc/customer-gateway/xray.json
 Restart=on-failure
 RestartSec=3
@@ -941,6 +1026,11 @@ cgw_status(){
     if [[ -s "$CGW_STATE" ]]; then
         echo -e "  Client endpoint         : ${CYAN}$(cgw_client_host):$(cgw_state_get port)${NC}"
         echo -e "  Subscription endpoint   : ${CYAN}$(cgw_state_get sub_scheme)://$(cgw_state_get sub_host):$(cgw_state_get sub_port)${NC}"
+        if [[ "$(cgw_state_get bypass_ir 2>/dev/null || true)" == "1" ]]; then
+            echo -e "  Iran-IP traffic         : ${GREEN}direct (bypassing Turkey)${NC}"
+        else
+            echo -e "  Iran-IP traffic         : ${DIM}via Turkey (bypass off)${NC}"
+        fi
     fi
     press_enter
 }
@@ -958,8 +1048,14 @@ cgw_menu(){
         echo -e "  ${CYAN}2)${NC} Upgrade / repair runtime ${DIM}(no key/certificate changes)${NC}"
         echo -e "  ${CYAN}3)${NC} Status / health check"
         echo -e "  ${CYAN}4)${NC} Security audit"
-        echo -e "  ${CYAN}5)${NC} Remove gateway"
+        local bstat; bstat=$(cgw_state_get bypass_ir 2>/dev/null || true)
+        if [[ "$bstat" == "1" ]]; then
+            echo -e "  ${CYAN}5)${NC} Route Iran traffic directly ${GREEN}[ON]${NC} ${DIM}(toggle off)${NC}"
+        else
+            echo -e "  ${CYAN}5)${NC} Route Iran traffic directly ${DIM}[OFF] (toggle on)${NC}"
+        fi
+        echo -e "  ${CYAN}6)${NC} Remove gateway"
         echo -e "  ${CYAN}0)${NC} Back"; menu_prompt
-        case "$MENU_CHOICE" in 1)cgw_setup;;2)cgw_upgrade_runtime;;3)cgw_status;;4)print_banner;print_header "Gateway Security Audit";cgw_security_audit;press_enter;;5)cgw_remove;;0)return;;*)print_warn "Invalid choice.";sleep 1;;esac
+        case "$MENU_CHOICE" in 1)cgw_setup;;2)cgw_upgrade_runtime;;3)cgw_status;;4)print_banner;print_header "Gateway Security Audit";cgw_security_audit;press_enter;;5)cgw_toggle_bypass_ir;;6)cgw_remove;;0)return;;*)print_warn "Invalid choice.";sleep 1;;esac
     done
 }

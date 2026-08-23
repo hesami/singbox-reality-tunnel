@@ -31,10 +31,14 @@ xray_install_binary(){
     curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 180 -o "$tmp/xray.zip" "$url" >/dev/null 2>&1 || {
         rm -rf "$tmp"; print_error "Xray v${version} download failed."; return 1;
     }
-    curl -fL --retry 3 --connect-timeout 15 --max-time 60 -o "$tmp/sha256sum.txt" "https://github.com/XTLS/Xray-core/releases/download/v${version}/sha256sum.txt" >/dev/null 2>&1 || {
-        rm -rf "$tmp"; print_error "Xray checksum download failed."; return 1;
+    # NOTE: Xray-core releases no longer ship a combined "sha256sum.txt".
+    # Each asset instead has its own "<asset>.dgst" sidecar file with
+    # MD5/SHA1/SHA2-256/SHA2-512 lines (verified against the real v26.7.28
+    # release on 2026-08-23). Parse the SHA2-256 line out of that file.
+    curl -fL --retry 3 --connect-timeout 15 --max-time 60 -o "$tmp/${asset}.dgst" "https://github.com/XTLS/Xray-core/releases/download/v${version}/${asset}.dgst" >/dev/null 2>&1 || {
+        rm -rf "$tmp"; print_error "Xray checksum (.dgst) download failed."; return 1;
     }
-    expected=$(awk -v a="$asset" '$2==a {print $1;exit}' "$tmp/sha256sum.txt")
+    expected=$(awk -F'= *' '/^SHA2-256=/{print tolower($2)}' "$tmp/${asset}.dgst" | tr -d '[:space:]')
     actual=$(sha256sum "$tmp/xray.zip" | awk '{print $1}')
     [[ -n "$expected" && "$actual" == "$expected" ]] || {
         rm -rf "$tmp"; print_error "Xray checksum verification failed."; return 1;

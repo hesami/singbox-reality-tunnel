@@ -7,9 +7,12 @@ db_init(){
     mkdir -p "$DB_DIR"
     DB_PATH="$DB_PATH" python3 - <<'PY'
 import sqlite3,os
-p=os.environ['DB_PATH']; c=sqlite3.connect(p)
+p=os.environ['DB_PATH']; c=sqlite3.connect(p, timeout=15)
+c.execute('PRAGMA busy_timeout=15000')
 c.executescript('''
 PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  uuid TEXT NOT NULL UNIQUE,
@@ -49,13 +52,16 @@ PY
 db_add_user(){
     local uuid="$1" label="$2" quota="$3" token="$4" expires="${5:-}"
     UUID="$uuid" LABEL="$label" QUOTA="$quota" TOKEN="$token" EXPIRES="$expires" DB_PATH="$DB_PATH" python3 - <<'PY'
-import sqlite3,json,os,sys
-c=sqlite3.connect(os.environ['DB_PATH'])
+import math,sqlite3,json,os,sys
+c=sqlite3.connect(os.environ['DB_PATH'], timeout=15)
+c.execute('PRAGMA busy_timeout=15000')
 try:
+ q=float(os.environ['QUOTA'] or 0)
+ if not math.isfinite(q) or q < 0: raise ValueError('quota must be a finite non-negative number')
  c.execute('INSERT INTO users(uuid,label,quota_gb,engines,sub_token,expires_at) VALUES(?,?,?,?,?,?)',(
-  os.environ['UUID'],os.environ['LABEL'],float(os.environ['QUOTA'] or 0),json.dumps({'gateway':True}),os.environ['TOKEN'],os.environ['EXPIRES'] or None))
+  os.environ['UUID'],os.environ['LABEL'],q,json.dumps({'gateway':True}),os.environ['TOKEN'],os.environ['EXPIRES'] or None))
  c.commit()
-except sqlite3.IntegrityError as e:
+except (sqlite3.IntegrityError,ValueError) as e:
  print(e,file=sys.stderr);sys.exit(1)
 finally:c.close()
 PY
@@ -76,12 +82,17 @@ db_update_field(){
     local uuid="$1" field="$2" value="$3"
     case "$field" in label|quota_gb|enabled|expires_at|note|last_seen|sub_token|engines) ;; *) return 1;; esac
     UUID="$uuid" FIELD="$field" VALUE="$value" DB_PATH="$DB_PATH" python3 - <<'PY'
-import sqlite3,os
-c=sqlite3.connect(os.environ['DB_PATH']); f=os.environ['FIELD']; v=os.environ['VALUE']
-if f in ('quota_gb',): v=float(v or 0)
-elif f in ('enabled',): v=int(v)
-elif f=='expires_at' and not v: v=None
-c.execute(f'UPDATE users SET {f}=? WHERE uuid=?',(v,os.environ['UUID']));c.commit();c.close()
+import math,sqlite3,os
+c=sqlite3.connect(os.environ['DB_PATH'], timeout=15); c.execute('PRAGMA busy_timeout=15000')
+f=os.environ['FIELD']; v=os.environ['VALUE']
+if f == 'quota_gb':
+ v=float(v or 0)
+ if not math.isfinite(v) or v < 0: raise SystemExit('invalid quota')
+elif f == 'enabled':
+ v=int(v)
+ if v not in (0,1): raise SystemExit('invalid enabled value')
+elif f == 'expires_at' and not v: v=None
+c.execute(f'UPDATE users SET {f}=? WHERE uuid=?',(v,os.environ['UUID'])); c.commit(); c.close()
 PY
 }
 db_delete_user(){ UUID="$1" DB_PATH="$DB_PATH" python3 - <<'PY'
@@ -92,6 +103,13 @@ PY
 db_reset_traffic(){ UUID="$1" DB_PATH="$DB_PATH" python3 - <<'PY'
 import sqlite3,os
 c=sqlite3.connect(os.environ['DB_PATH']);c.execute('UPDATE users SET used_bytes=0,last_seen=NULL WHERE uuid=?',(os.environ['UUID'],));c.execute('DELETE FROM traffic_log WHERE uuid=?',(os.environ['UUID'],));c.commit();c.close()
+PY
+}
+db_checkpoint(){
+    DB_PATH="$DB_PATH" python3 - <<'PY'
+import os,sqlite3
+c=sqlite3.connect(os.environ['DB_PATH'], timeout=15); c.execute('PRAGMA busy_timeout=15000')
+c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()
 PY
 }
 db_user_count(){ DB_PATH="$DB_PATH" python3 - <<'PY'

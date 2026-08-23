@@ -21,14 +21,23 @@ xray_current_version(){
 }
 
 xray_install_binary(){
-    local version="${1:-$XRAY_PINNED_VERSION}" arch tmp url staged got
+    local version="${1:-$XRAY_PINNED_VERSION}" arch tmp url staged got asset expected actual
     arch=$(_xray_arch) || { print_error "Unsupported CPU: $(uname -m)"; return 1; }
     ensure_packages curl unzip ca-certificates >/dev/null || return 1
     tmp=$(mktemp -d)
-    url="https://github.com/XTLS/Xray-core/releases/download/v${version}/Xray-linux-${arch}.zip"
+    asset="Xray-linux-${arch}.zip"
+    url="https://github.com/XTLS/Xray-core/releases/download/v${version}/${asset}"
     print_info "Installing pinned Xray-core v${version}..."
     curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 180 -o "$tmp/xray.zip" "$url" >/dev/null 2>&1 || {
         rm -rf "$tmp"; print_error "Xray v${version} download failed."; return 1;
+    }
+    curl -fL --retry 3 --connect-timeout 15 --max-time 60 -o "$tmp/sha256sum.txt" "https://github.com/XTLS/Xray-core/releases/download/v${version}/sha256sum.txt" >/dev/null 2>&1 || {
+        rm -rf "$tmp"; print_error "Xray checksum download failed."; return 1;
+    }
+    expected=$(awk -v a="$asset" '$2==a {print $1;exit}' "$tmp/sha256sum.txt")
+    actual=$(sha256sum "$tmp/xray.zip" | awk '{print $1}')
+    [[ -n "$expected" && "$actual" == "$expected" ]] || {
+        rm -rf "$tmp"; print_error "Xray checksum verification failed."; return 1;
     }
     unzip -q -o "$tmp/xray.zip" -d "$tmp" || { rm -rf "$tmp"; print_error "Xray archive extraction failed."; return 1; }
     [[ -x "$tmp/xray" ]] || { rm -rf "$tmp"; print_error "Xray binary missing from release archive."; return 1; }

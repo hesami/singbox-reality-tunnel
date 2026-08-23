@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Customer Gateway v4.2.0: domain-first endpoint + external-path VLESS/Reality validation via the foreign exit.
+# Customer Gateway v4.3.0: domain-first endpoint + external-path VLESS/Reality validation via the foreign exit.
 # Does not modify nginx, websites, or ports 80/443.
 
 CGW_DIR="/etc/customer-gateway"
@@ -27,6 +27,12 @@ try:
 except Exception:
     pass
 PY
+}
+
+cgw_exit_port(){
+    local p
+    p=$(cgw_state_get exit_socks_port 2>/dev/null || true)
+    valid_port "$p" && echo "$p" || rssh_socks_port
 }
 
 cgw_client_host() {
@@ -81,7 +87,7 @@ PY2
 cgw_rebuild_if_installed() {
     cgw_installed || return 0
     [[ -x "$CGW_REBUILD" ]] || return 0
-    "$CGW_REBUILD" >/dev/null 2>&1 || true
+    "$CGW_REBUILD" >/dev/null 2>&1
 }
 
 cgw_enable_user() {
@@ -100,7 +106,8 @@ s=json.load(open(os.environ['STATE']))
 label=urllib.parse.quote(os.environ['LABEL'], safe='')
 q={'encryption':'none','security':'reality','sni':s['sni'],'fp':'chrome','pbk':s['public_key'],'sid':s['short_id'],'type':'tcp','headerType':'none','spx':'/'}
 host=s.get('client_host') or s.get('host')
-print(f"vless://{os.environ['UUID']}@{host}:{s['port']}?{urllib.parse.urlencode(q)}#{label}")
+endpoint=f'[{host}]' if ':' in host and not host.startswith('[') else host
+print(f"vless://{os.environ['UUID']}@{endpoint}:{s['port']}?{urllib.parse.urlencode(q)}#{label}")
 PY
 }
 
@@ -225,6 +232,10 @@ import base64,json,sqlite3,urllib.parse,ssl,time,threading,traceback
 from collections import defaultdict,deque
 from datetime import datetime,timezone
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+
+class SafeHTTPServer(ThreadingHTTPServer):
+ daemon_threads=True
+ allow_reuse_address=True
 DB='/etc/singbox-manager/data/users.db';STATE='/etc/customer-gateway/gateway.json';LOG='/var/log/customer-gateway-sub.log';lock=threading.Lock();allq=defaultdict(deque);badq=defaultdict(deque)
 def throttle(ip,bad=False):
  now=time.time();q=badq[ip] if bad else allq[ip];cap=10 if bad else 90
@@ -252,7 +263,8 @@ def active(r):
 def link(r,st):
  q={'encryption':'none','security':'reality','sni':st['sni'],'fp':'chrome','pbk':st['public_key'],'sid':st['short_id'],'type':'tcp','headerType':'none','spx':'/'}
  host=st.get('client_host') or st.get('host')
- return f"vless://{r['uuid']}@{host}:{st['port']}?{urllib.parse.urlencode(q)}#{urllib.parse.quote(r['label'] or 'User',safe='')}"
+ endpoint=f'[{host}]' if ':' in host and not host.startswith('[') else host
+ return f"vless://{r['uuid']}@{endpoint}:{st['port']}?{urllib.parse.urlencode(q)}#{urllib.parse.quote(r['label'] or 'User',safe='')}"
 class H(BaseHTTPRequestHandler):
  server_version='Subscription/1.1'
  def log_message(self,*a):pass
@@ -263,7 +275,7 @@ class H(BaseHTTPRequestHandler):
   try:
    if not throttle(ip):return self.out(429,b'Too Many Requests')
    if not self.path.startswith('/sub/'):return self.out(404,b'Not Found')
-   tok=self.path.split('/sub/',1)[1].split('?',1)[0].strip('/')
+   tok=urllib.parse.unquote(self.path.split('/sub/',1)[1].split('?',1)[0].strip('/'))
    c=sqlite3.connect(DB);c.row_factory=sqlite3.Row
    try:r=c.execute('SELECT * FROM users WHERE sub_token=?',(tok,)).fetchone()
    finally:c.close()
@@ -282,7 +294,7 @@ class H(BaseHTTPRequestHandler):
    except:pass
    try:self.out(500,b'Internal Server Error')
    except:pass
-st=json.load(open(STATE));srv=ThreadingHTTPServer(('0.0.0.0',int(st['sub_port'])),H)
+st=json.load(open(STATE));srv=SafeHTTPServer(('0.0.0.0',int(st['sub_port'])),H)
 if st.get('sub_scheme')=='https':
  ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.minimum_version=ssl.TLSVersion.TLSv1_2;ctx.load_cert_chain(st['tls_cert'],st['tls_key']);srv.socket=ctx.wrap_socket(srv.socket,server_side=True)
 srv.serve_forever()
@@ -297,6 +309,7 @@ Description=Customer VLESS Reality Gateway via Turkey reverse SOCKS
 After=network-online.target
 [Service]
 Type=simple
+UMask=0077
 ExecStart=/usr/local/bin/xray run -config /etc/customer-gateway/xray.json
 Restart=on-failure
 RestartSec=3
@@ -314,6 +327,7 @@ Description=Customer Gateway Subscription Server
 After=network-online.target customer-gateway.service
 [Service]
 Type=simple
+UMask=0077
 ExecStart=/usr/bin/python3 /etc/customer-gateway/subscription_server.py
 Restart=always
 RestartSec=3
@@ -330,12 +344,18 @@ cat >/etc/customer-gateway/watchdog.sh <<'SH'
 # Conservative kill-switch: use a fixed, highly available endpoint and require
 # repeated consecutive failures before stopping the customer gateway.
 f=/run/customer-gateway-watchdog.fail
+port=$(python3 - <<'PY'
+import json
+try: print(int(json.load(open('/etc/customer-gateway/gateway.json')).get('exit_socks_port',10808)))
+except Exception: print(10808)
+PY
+)
 n=0
 [[ -f "$f" ]] && n=$(cat "$f" 2>/dev/null || echo 0)
 probe(){
   local body ip i
   for i in 1 2; do
-    body=$(curl -4kfsS --connect-timeout 3 --max-time 6 --socks5 127.0.0.1:10808 https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
+    body=$(curl -4kfsS --connect-timeout 3 --max-time 6 --socks5 "127.0.0.1:${port}" https://1.1.1.1/cdn-cgi/trace 2>/dev/null || true)
     ip=$(printf '%s\n' "$body" | awk -F= '$1=="ip"{print $2;exit}' | tr -d '[:space:]')
     [[ -n "$ip" ]] && return 0
     sleep 1
@@ -428,7 +448,7 @@ F2B
 }
 
 cgw_backup(){
-    local d="${BASE_DIR}/backups" f; mkdir -p "$d"; f="$d/gateway-$(date +%Y%m%d-%H%M%S).tar.gz"
+    local d="${BASE_DIR}/backups" f; mkdir -p "$d"; db_checkpoint || return 1; f="$d/gateway-$(date +%Y%m%d-%H%M%S).tar.gz"
     local items=(); [[ -f "$DB_PATH" ]] && items+=("$DB_PATH"); [[ -d "$CGW_DIR" ]] && items+=("$CGW_DIR"); [[ -d "$RSSH_DIR" ]] && items+=("$RSSH_DIR")
     ((${#items[@]})) || { print_error "Nothing to back up."; return 1; }
     tar -czf "$f" "${items[@]}" 2>/dev/null || return 1; chmod 600 "$f"; print_success "Backup created: $f"
@@ -467,7 +487,8 @@ PY
 cgw_local_client_test(){
     cgw_installed || { echo "GATEWAY_NOT_CONFIGURED"; return 2; }
     systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null || { echo "GATEWAY_NOT_RUNNING"; return 3; }
-    local uuid state_port client_host sni pub sid test_port tmp log pid out expected i err_start access_start
+    local uuid state_port client_host sni pub sid test_port tmp log pid out expected i err_start access_start exit_port
+    exit_port=$(cgw_exit_port)
     uuid=$(cgw_pick_test_user 2>/dev/null || true)
     [[ -n "$uuid" ]] || { echo "NO_ACTIVE_USER"; return 4; }
     state_port=$(cgw_state_get port)
@@ -477,7 +498,7 @@ cgw_local_client_test(){
     # Prove the reverse SOCKS first. Then dial the public customer endpoint THROUGH
     # that SOCKS so the probe exits from the foreign server and re-enters Iran like
     # a real remote client. This avoids false negatives from same-host loopback.
-    expected=$(rssh_test_socks 10808 12 || true)
+    expected=$(rssh_test_socks "$exit_port" 12 || true)
     [[ -n "$expected" ]] || { echo "FOREIGN_SOCKS_FAILED"; return 5; }
     [[ -n "$client_host" ]] || { echo "CLIENT_ENDPOINT_MISSING"; return 6; }
 
@@ -485,11 +506,12 @@ cgw_local_client_test(){
     for i in $(seq 19081 19120); do
         if ! ss -H -ltn 2>/dev/null | awk -v p=":$i" '$4 ~ p"$"{f=1}END{exit !f}'; then test_port=$i; break; fi
     done
+    ss -H -ltn 2>/dev/null | awk -v p=":$test_port" '$4 ~ p"$"{f=1}END{exit f}' || { echo "NO_FREE_TEST_PORT"; return 6; }
     tmp=$(mktemp --suffix=.json); log=$(mktemp)
     err_start=$(wc -l </var/log/customer-gateway-error.log 2>/dev/null || echo 0)
     access_start=$(wc -l </var/log/customer-gateway-access.log 2>/dev/null || echo 0)
 
-    UUID="$uuid" HOST="$client_host" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" python3 - "$tmp" <<'PYTEST'
+    UUID="$uuid" HOST="$client_host" PORT="$state_port" SNI="$sni" PUB="$pub" SID="$sid" LPORT="$test_port" EXITPORT="$exit_port" python3 - "$tmp" <<'PYTEST'
 import json,os,sys
 cfg={
  'log':{'loglevel':'debug'},
@@ -503,7 +525,7 @@ cfg={
    }},
    'proxySettings':{'tag':'foreign-hop','transportLayer':True}
   },
-  {'tag':'foreign-hop','protocol':'socks','settings':{'address':'127.0.0.1','port':10808}}
+  {'tag':'foreign-hop','protocol':'socks','settings':{'address':'127.0.0.1','port':int(os.environ['EXITPORT'])}}
  ]
 }
 with open(sys.argv[1],'w') as f: json.dump(cfg,f)
@@ -546,14 +568,16 @@ cgw_reality_target_test(){
 }
 
 cgw_security_audit(){
-    local scheme host port exit
+    local scheme host port exit exit_port
+    exit_port=$(cgw_exit_port)
+    valid_port "$exit_port" || exit_port=10808
     scheme=$(cgw_state_get sub_scheme 2>/dev/null || echo http); host=$(cgw_state_get sub_host 2>/dev/null || true); port=$(cgw_state_get sub_port 2>/dev/null || true)
     echo "Subscription           : ${scheme}://${host}:${port}"
     [[ "$scheme" == https ]] && print_success "HTTPS subscription enabled." || print_warn "Subscription uses HTTP."
-    ss -H -ltn 2>/dev/null | grep -q '127.0.0.1:10808' && print_success "Turkey SOCKS is loopback-only." || print_warn "Reverse SOCKS listener is missing."
+    ss -H -ltn 2>/dev/null | grep -q "127.0.0.1:${exit_port}" && print_success "Turkey SOCKS is loopback-only." || print_warn "Reverse SOCKS listener is missing."
     systemctl is-active --quiet customer-gateway-watchdog.timer 2>/dev/null && print_success "Kill-switch watchdog active." || print_warn "Kill-switch watchdog inactive."
     systemctl is-active --quiet fail2ban 2>/dev/null && print_success "Fail2ban active." || print_warn "Fail2ban inactive."
-    exit=$(rssh_test_socks 10808 10 || true); [[ -n "$exit" ]] && print_success "Turkey egress healthy: $exit" || print_error "Turkey egress failed."
+    exit=$(rssh_test_socks "$(cgw_exit_port)" 10 || true); [[ -n "$exit" ]] && print_success "Turkey egress healthy: $exit" || print_error "Turkey egress failed."
     if cgw_reality_target_test; then print_success "REALITY camouflage target is reachable from Iran."; else print_warn "REALITY camouflage target may be unreachable from Iran."; fi
     local rt; rt=$(cgw_local_client_test 2>&1); case $? in
       0) print_success "Local VLESS/REALITY → Turkey path works: $rt" ;;
@@ -565,13 +589,14 @@ cgw_security_audit(){
 cgw_setup(){
     print_banner; print_header "Customer Gateway — Iran Access for v2rayN"
     echo -e "  ${DIM}Clients connect to Iran with VLESS+Reality; all Internet egress uses the verified Turkey reverse-SSH tunnel.${NC}\n"
-    local exit_ip; exit_ip=$(rssh_test_socks 10808 15 || true)
-    [[ -n "$exit_ip" ]] || { print_error "Turkey tunnel is not healthy on 127.0.0.1:10808. Configure Tunnel first."; press_enter; return 1; }
+    local exit_port exit_ip; exit_port=$(rssh_socks_port); exit_ip=$(rssh_test_socks "$exit_port" 15 || true)
+    [[ -n "$exit_ip" ]] || { print_error "Turkey tunnel is not healthy on 127.0.0.1:${exit_port}. Configure Tunnel first."; press_enter; return 1; }
     print_success "Turkey exit verified: $exit_ip"
     xray_ensure || { press_enter; return 1; }; ensure_packages python3 openssl cron iptables ca-certificates || { press_enter; return 1; }; db_init || { press_enter; return 1; }
 
     local old=0 host port sub_port sni sid priv pub kp cur_scheme cur_subhost cur_cert cur_key keep_keys detected_ip legacy_host
     detected_ip=$(get_public_ip 2>/dev/null || true)
+    exit_port=$(rssh_socks_port)
     if [[ -s "$CGW_STATE" ]]; then
         old=1; legacy_host=$(cgw_state_get host); host=$(cgw_client_host); port=$(cgw_state_get port); sub_port=$(cgw_state_get sub_port); sni=$(cgw_state_get sni)
         sid=$(cgw_state_get short_id); priv=$(cgw_state_get private_key); pub=$(cgw_state_get public_key)
@@ -597,8 +622,10 @@ cgw_setup(){
         fi
     fi
     ask port "  VLESS Reality TCP port" "$port"; valid_port "$port" || { print_error "Invalid port."; press_enter; return 1; }
+    valid_host "$host" && [[ "$host" != unknown ]] || { print_error "Invalid VLESS endpoint host."; press_enter; return 1; }
     ask sub_port "  Subscription port" "$sub_port"; valid_port "$sub_port" || { print_error "Invalid subscription port."; press_enter; return 1; }
     ask sni "  Reality camouflage SNI" "$sni"
+    cgw_is_domain "$sni" || { print_error "Reality SNI must be a DNS hostname."; press_enter; return 1; }
     if cgw_probe_reality_sni "$sni"; then
         print_success "REALITY target responds to TLS from this Iran server: ${sni}:443"
     else
@@ -606,6 +633,8 @@ cgw_setup(){
         confirm "Continue with this SNI anyway?" n || { print_info "Re-run Setup and choose a reachable TLS target."; press_enter; return 1; }
     fi
     cgw_configure_subscription_tls "${cur_subhost:-$host}" "$cur_scheme" "$cur_subhost" "$cur_cert" "$cur_key" || { print_error "Subscription security setup failed."; press_enter; return 1; }
+    valid_host "$CGW_TLS_HOST" || { print_error "Invalid subscription host."; press_enter; return 1; }
+    if [[ "$CGW_TLS_SCHEME" == https ]] && ! cgw_is_domain "$CGW_TLS_HOST"; then print_error "HTTPS subscription requires a DNS hostname with a valid certificate."; press_enter; return 1; fi
 
     # If the operator kept the auto-detected IP at the first prompt but then configured
     # a valid HTTPS subscription domain that points directly to this VPS, use that same
@@ -626,11 +655,12 @@ cgw_setup(){
     fi
 
     mkdir -p "$CGW_DIR"
-    HOST="$host" PORT="$port" SUB="$sub_port" SNI="$sni" SID="$sid" PRIV="$priv" PUB="$pub" SUBSCHEME="$CGW_TLS_SCHEME" SUBHOST="$CGW_TLS_HOST" TLSCERT="$CGW_TLS_CERT" TLSKEY="$CGW_TLS_KEY" python3 - <<'PY'
+    HOST="$host" PORT="$port" SUB="$sub_port" EXITPORT="$exit_port" SNI="$sni" SID="$sid" PRIV="$priv" PUB="$pub" SUBSCHEME="$CGW_TLS_SCHEME" SUBHOST="$CGW_TLS_HOST" TLSCERT="$CGW_TLS_CERT" TLSKEY="$CGW_TLS_KEY" python3 - <<'PY'
 import json,os
-s={'client_host':os.environ['HOST'],'host':os.environ['HOST'],'port':int(os.environ['PORT']),'sub_port':int(os.environ['SUB']),'sni':os.environ['SNI'],'short_id':os.environ['SID'],'private_key':os.environ['PRIV'],'public_key':os.environ['PUB'],'exit_socks_port':10808,'stats_port':10085,'sub_scheme':os.environ.get('SUBSCHEME','http'),'sub_host':os.environ.get('SUBHOST') or os.environ['HOST'],'tls_cert':os.environ.get('TLSCERT',''),'tls_key':os.environ.get('TLSKEY','')}
-with open('/etc/customer-gateway/gateway.json','w') as f:json.dump(s,f,indent=2)
-os.chmod('/etc/customer-gateway/gateway.json',0o600)
+s={'client_host':os.environ['HOST'],'host':os.environ['HOST'],'port':int(os.environ['PORT']),'sub_port':int(os.environ['SUB']),'sni':os.environ['SNI'],'short_id':os.environ['SID'],'private_key':os.environ['PRIV'],'public_key':os.environ['PUB'],'exit_socks_port':int(os.environ['EXITPORT']),'stats_port':10085,'sub_scheme':os.environ.get('SUBSCHEME','http'),'sub_host':os.environ.get('SUBHOST') or os.environ['HOST'],'tls_cert':os.environ.get('TLSCERT',''),'tls_key':os.environ.get('TLSKEY','')}
+tmp='/etc/customer-gateway/.gateway.json.new'
+with open(tmp,'w') as f: json.dump(s,f,indent=2); f.write('\n')
+os.chmod(tmp,0o600); os.replace(tmp,'/etc/customer-gateway/gateway.json')
 PY
     # All existing users belong to the single retained gateway engine.
     DB_PATH="$DB_PATH" python3 - <<'PY'
@@ -733,7 +763,7 @@ cgw_upgrade_runtime(){
 cgw_status(){
     print_banner; print_header "Customer Gateway Status"
     service_status_line "$CGW_SERVICE" "Customer VLESS gateway"; service_status_line "$CGW_SUB_SERVICE" "Subscription service"; service_status_line customer-gateway-watchdog.timer "Kill-switch watchdog"
-    local exit xv; exit=$(rssh_test_socks 10808 10 || true); xv=$(xray_current_version 2>/dev/null || true)
+    local exit xv; exit=$(rssh_test_socks "$(cgw_exit_port)" 10 || true); xv=$(xray_current_version 2>/dev/null || true)
     echo -e "  Foreign exit            : ${CYAN}${exit:-FAILED}${NC}"
     if [[ "$xv" == "$XRAY_PINNED_VERSION" ]]; then
         echo -e "  Xray data-plane         : ${CYAN}v${xv} (pinned)${NC}"

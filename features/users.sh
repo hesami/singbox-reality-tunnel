@@ -6,7 +6,7 @@ users_sub_url(){
     local token="$1" host port scheme
     users_gateway_installed || return 1
     host=$(cgw_state_get sub_host); port=$(cgw_state_get sub_port); scheme=$(cgw_state_get sub_scheme); [[ -n "$scheme" ]] || scheme=http
-    echo "${scheme}://${host}:${port}/sub/${token}"
+    echo "${scheme}://$(host_port "$host" "$port")/sub/${token}"
 }
 _users_expiry_from_days(){ DAYS="$1" python3 - <<'PY'
 from datetime import datetime,timedelta,timezone
@@ -34,7 +34,7 @@ users_add(){
     [[ "$days" =~ ^[0-9]+$ ]] || { print_error "Validity must be a whole number."; press_enter; return 1; }
     uuid=$(generate_uuid); token=$(generate_token); exp=$(_users_expiry_from_days "$days")
     db_add_user "$uuid" "$label" "$quota" "$token" "$exp" || { print_error "Database insert failed."; press_enter; return 1; }
-    cgw_rebuild_if_installed
+    if ! cgw_rebuild_if_installed; then db_delete_user "$uuid"; print_error "Gateway rebuild failed; customer was not kept."; press_enter; return 1; fi
     sub=$(users_sub_url "$token")
     echo; print_success "Customer created."
     echo -e "  Label        : ${CYAN}${label}${NC}"
@@ -85,21 +85,21 @@ users_edit(){
     ask days "  Validity change" "0"
     db_update_field "$u" label "$label"; db_update_field "$u" quota_gb "$quota"; db_update_field "$u" note "$note"
     if [[ "$days" == -1 ]]; then db_update_field "$u" expires_at ""; elif [[ "$days" =~ ^[1-9][0-9]*$ ]]; then exp=$(_users_expiry_from_days "$days"); db_update_field "$u" expires_at "$exp"; fi
-    cgw_rebuild_if_installed; print_success "Customer updated."; press_enter
+    cgw_rebuild_if_installed || { print_error "Customer saved, but gateway rebuild failed. Run Gateway → Upgrade/repair."; press_enter; return 1; }; print_success "Customer updated."; press_enter
 }
 users_toggle(){
     users_pick "Select customer to enable/disable" || { press_enter; return; }; local j cur
     j=$(db_get_user "$USER_PICK_UUID"); cur=$(_users_json_field "$j" enabled)
     if [[ "$cur" == 1 ]]; then db_update_field "$USER_PICK_UUID" enabled 0; print_success "Customer disabled."; else db_update_field "$USER_PICK_UUID" enabled 1; print_success "Customer enabled."; fi
-    cgw_rebuild_if_installed; press_enter
+    cgw_rebuild_if_installed || print_warn "State changed, but gateway rebuild failed."; press_enter
 }
 users_reset_traffic(){
     users_pick "Select customer to reset traffic" || { press_enter; return; }; confirm "Reset consumed traffic and re-enable this customer?" n || return
-    db_reset_traffic "$USER_PICK_UUID"; db_update_field "$USER_PICK_UUID" enabled 1; cgw_rebuild_if_installed; print_success "Traffic reset."; press_enter
+    db_reset_traffic "$USER_PICK_UUID"; db_update_field "$USER_PICK_UUID" enabled 1; cgw_rebuild_if_installed || print_warn "Traffic reset, but gateway rebuild failed."; print_success "Traffic reset."; press_enter
 }
 users_delete(){
     users_pick "Select customer to delete" || { press_enter; return; }; local j label; j=$(db_get_user "$USER_PICK_UUID"); label=$(_users_json_field "$j" label)
-    confirm "Permanently delete '${label}'?" n || return; db_delete_user "$USER_PICK_UUID"; cgw_rebuild_if_installed; print_success "Customer deleted."; press_enter
+    confirm "Permanently delete '${label}'?" n || return; db_delete_user "$USER_PICK_UUID"; cgw_rebuild_if_installed || print_warn "Customer deleted, but gateway rebuild failed."; print_success "Customer deleted."; press_enter
 }
 users_rotate_sub_token(){
     users_pick "Select customer" || { press_enter; return; }; local t sub; t=$(generate_token); db_update_field "$USER_PICK_UUID" sub_token "$t"; sub=$(users_sub_url "$t")
@@ -114,7 +114,7 @@ c=sqlite3.connect(os.environ['DB_PATH'])
 for u in json.loads(os.environ['EXPIRED']):c.execute('UPDATE users SET enabled=0 WHERE uuid=?',(u,))
 c.commit();c.close()
 PY
-    cgw_rebuild_if_installed; print_success "$count expired customer(s) disabled."
+    cgw_rebuild_if_installed || print_warn "Expired customers disabled, but gateway rebuild failed."; print_success "$count expired customer(s) disabled."
 }
 
 users_menu(){

@@ -17,8 +17,8 @@ overall_health(){
     service_status_line "$CGW_SUB_SERVICE" "Subscription service"
     service_status_line customer-gateway-watchdog.timer "Gateway kill-switch"
     echo
-    exit=$(rssh_test_socks 10808 10 || true)
-    [[ -n "$exit" ]] && print_success "End-to-end Turkey exit works: $exit" || print_warn "No verified Turkey exit on 127.0.0.1:10808."
+    exit=$(rssh_test_socks "$(rssh_socks_port)" 10 || true)
+    [[ -n "$exit" ]] && print_success "End-to-end Turkey exit works: $exit" || print_warn "No verified Turkey exit on 127.0.0.1:$(rssh_socks_port)."
     if [[ -s "$CGW_STATE" ]]; then
         echo -e "  Client endpoint         : ${CYAN}$(cgw_client_host):$(cgw_state_get port)${NC}"
         echo -e "  Subscription endpoint   : ${CYAN}$(cgw_state_get sub_scheme)://$(cgw_state_get sub_host):$(cgw_state_get sub_port)/sub/<token>${NC}"
@@ -44,7 +44,7 @@ ops_security_menu(){
         echo -e "  ${CYAN}4)${NC} Show listening ports"
         echo -e "  ${CYAN}0)${NC} Back"; menu_prompt
         case "$MENU_CHOICE" in
-          1) print_banner;print_header "Security Audit";echo -e "${BOLD}Tunnel:${NC}";rssh_security_audit 10808 | sed 's/^/  /';echo;echo -e "${BOLD}Gateway:${NC}";cgw_security_audit 2>/dev/null || print_info "Customer Gateway not configured.";press_enter ;;
+          1) print_banner;print_header "Security Audit";echo -e "${BOLD}Tunnel:${NC}";rssh_security_audit "$(rssh_socks_port)" | sed 's/^/  /';echo;echo -e "${BOLD}Gateway:${NC}";cgw_security_audit 2>/dev/null || print_info "Customer Gateway not configured.";press_enter ;;
           2) print_banner;print_header "Safe TCP Tuning";print_success "Applied: $(rssh_apply_performance)";press_enter ;;
           3) _tunnel_rotate ;;
           4) print_banner;print_header "Listening Ports";ss -lntup 2>/dev/null | sed -n '1,80p';press_enter ;;
@@ -54,8 +54,8 @@ ops_security_menu(){
 }
 
 ops_backup(){
-    local d="${BASE_DIR}/backups" f list; mkdir -p "$d"; f="$d/full-stack-$(date +%Y%m%d-%H%M%S).tar.gz"; list=$(mktemp)
-    for p in "$DB_PATH" "$CGW_DIR" "$RSSH_DIR" "$RSSH_SSHD_CONFIG" "$RSSH_HOME/.ssh/authorized_keys" "/etc/systemd/system/${RSSH_SERVICE}" "/etc/systemd/system/${RSSH_SSHD_SERVICE}" "/etc/systemd/system/${CGW_SERVICE}" "/etc/systemd/system/${CGW_SUB_SERVICE}" /etc/systemd/system/customer-gateway-watchdog.service /etc/systemd/system/customer-gateway-watchdog.timer; do [[ -e "$p" ]] && echo "${p#/}" >>"$list"; done
+    local d="${BASE_DIR}/backups" f list; mkdir -p "$d"; db_checkpoint || { print_error "Could not checkpoint the SQLite database."; return 1; }; f="$d/full-stack-$(date +%Y%m%d-%H%M%S).tar.gz"; list=$(mktemp)
+    for p in "$DB_PATH" "${DB_PATH}-wal" "${DB_PATH}-shm" "$CGW_DIR" "$RSSH_DIR" "$RSSH_SSHD_CONFIG" "$RSSH_HOME/.ssh/authorized_keys" "/etc/systemd/system/${RSSH_SERVICE}" "/etc/systemd/system/${RSSH_SSHD_SERVICE}" "/etc/systemd/system/${CGW_SERVICE}" "/etc/systemd/system/${CGW_SUB_SERVICE}" /etc/systemd/system/customer-gateway-watchdog.service /etc/systemd/system/customer-gateway-watchdog.timer; do [[ -e "$p" ]] && echo "${p#/}" >>"$list"; done
     [[ -s "$list" ]] || { rm -f "$list"; print_error "Nothing to back up."; return 1; }
     tar -C / -czf "$f" -T "$list" || { rm -f "$list"; return 1; }; rm -f "$list"; chmod 600 "$f"; print_success "Backup created: $f"
 }

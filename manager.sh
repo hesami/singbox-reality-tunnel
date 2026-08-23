@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Iran-Turkey Gateway Manager v4.2.0 — minimal production edition.
 set -uo pipefail
+umask 077
 trap 'echo "ERROR: command failed near line $LINENO" >&2' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _src(){ source "${SCRIPT_DIR}/$1" || { echo "ERROR: cannot load $1" >&2; exit 1; }; }
@@ -19,7 +20,7 @@ mkdir -p "$BASE_DIR" "$DATA_DIR" "$LOG_DIR"; check_root; check_os; db_init >/dev
 
 _status_bar(){
     local role exit users
-    role=$(infer_role); users=$(db_user_count 2>/dev/null || echo 0); exit=$(rssh_test_socks 10808 3 2>/dev/null || true)
+    role=$(infer_role); users=$(db_user_count 2>/dev/null || echo 0); exit=$(rssh_test_socks "$(rssh_socks_port)" 3 2>/dev/null || true)
     echo -e "  ${DIM}Role:${NC} ${CYAN}${role}${NC}   ${DIM}Customers:${NC} ${CYAN}${users}${NC}   ${DIM}Turkey exit:${NC} $([[ -n "$exit" ]] && echo -e "${GREEN}${exit}${NC}" || echo -e "${DIM}not verified${NC}")"
     echo
 }

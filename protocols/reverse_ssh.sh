@@ -26,8 +26,15 @@ rssh_public_key(){ [[ -s "${RSSH_KEY}.pub" ]] && cat "${RSSH_KEY}.pub"; }
 rssh_validate_public_key(){ [[ "$1" =~ ^ssh-ed25519[[:space:]]+[A-Za-z0-9+/=]+([[:space:]].*)?$ ]]; }
 rssh_public_ip(){ get_public_ip; }
 
+rssh_socks_port(){
+    local p=""
+    if [[ -r "$RSSH_ENV" ]]; then p=$(awk -F= '$1=="IRAN_SOCKS_PORT"{print $2;exit}' "$RSSH_ENV" 2>/dev/null || true); fi
+    if ! valid_port "$p" && [[ -r "$RSSH_SSHD_CONFIG" ]]; then p=$(sed -nE 's/^PermitListen[[:space:]]+127\.0\.0\.1:([0-9]+).*/\1/p' "$RSSH_SSHD_CONFIG" | head -1); fi
+    valid_port "$p" && echo "$p" || echo 10808
+}
 rssh_pair_code(){
     local turkey_ip="$1" ssh_port="$2" socks_port="$3" pubkey="$4"
+    valid_ipv4 "$turkey_ip" && valid_port "$ssh_port" && valid_port "$socks_port" && rssh_validate_public_key "$pubkey" || return 2
     TURKEY_IP="$turkey_ip" SSH_PORT="$ssh_port" SOCKS_PORT="$socks_port" PUBKEY="$pubkey" python3 - <<'PY'
 import os,json,base64
 obj={'v':1,'turkey_ip':os.environ['TURKEY_IP'],'ssh_port':int(os.environ['SSH_PORT']),'socks_port':int(os.environ['SOCKS_PORT']),'public_key':os.environ['PUBKEY']}
@@ -146,7 +153,7 @@ EOF2
 }
 rssh_write_foreign_service(){
     local iran_host="$1" ssh_port="$2" socks_port="$3"
-    valid_port "$ssh_port" || return 2; valid_port "$socks_port" || return 2; mkdir -p "$RSSH_DIR"; chmod 700 "$RSSH_DIR"
+    valid_host "$iran_host" || return 2; valid_port "$ssh_port" || return 2; valid_port "$socks_port" || return 2; mkdir -p "$RSSH_DIR"; chmod 700 "$RSSH_DIR"; touch "$RSSH_KNOWN_HOSTS"; chmod 600 "$RSSH_KNOWN_HOSTS"
     cat >"$RSSH_ENV" <<EOF2
 IRAN_HOST=${iran_host}
 IRAN_SSH_PORT=${ssh_port}
@@ -182,7 +189,8 @@ rssh_test_socks(){
     # Do not use a single public-IP service as a tunnel health oracle. Some
     # providers intermittently throttle VPS traffic and can trigger false
     # kill-switch failures. Probe a fixed Cloudflare endpoint first and retry.
-    local port="${1:-10808}" timeout="${2:-15}" body ip i per_try
+    local port="${1:-$(rssh_socks_port)}" timeout="${2:-15}" body ip i per_try
+    valid_port "$port" || return 2
     per_try=$(( timeout / 3 )); (( per_try < 3 )) && per_try=3; (( per_try > 8 )) && per_try=8
     : > /tmp/reverse-ssh-curl.err 2>/dev/null || true
     for i in 1 2 3; do
@@ -205,7 +213,7 @@ rssh_remove_iran_authorization(){
     local ak="$RSSH_HOME/.ssh/authorized_keys" tmp; [[ -f "$ak" ]] || return 0; tmp=$(mktemp); grep -v "$RSSH_MARKER" "$ak" >"$tmp" 2>/dev/null || true; cat "$tmp" >"$ak"; rm -f "$tmp"; chown "$RSSH_USER:$RSSH_USER" "$ak" 2>/dev/null || true
 }
 rssh_security_audit(){
-    local p="${1:-10808}" ip
+    local p="${1:-$(rssh_socks_port)}" ip
     echo "Restricted user       : $(id "$RSSH_USER" >/dev/null 2>&1 && echo OK || echo MISSING)"
     echo "Dedicated Iran sshd   : $(systemctl is-active --quiet "$RSSH_SSHD_SERVICE" 2>/dev/null && echo RUNNING || echo NOT-RUNNING)"
     echo "Turkey connector      : $(systemctl is-active --quiet "$RSSH_SERVICE" 2>/dev/null && echo RUNNING || echo NOT-RUNNING)"

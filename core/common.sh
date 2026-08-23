@@ -4,7 +4,7 @@
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
 CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
-MANAGER_VERSION="4.2.0"
+MANAGER_VERSION="4.3.0"
 MANAGER_AUTHOR="Mehdi Hesami"
 BASE_DIR="/etc/singbox-manager"
 DATA_DIR="${BASE_DIR}/data"
@@ -63,5 +63,21 @@ for u in ('B','KB','MB','GB','TB'):
 PY
 }
 pad_right(){ printf "%-${1}s" "$2"; }
+valid_ipv4(){
+    local ip="$1" part n
+    [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS=. read -r -a parts <<<"$ip"
+    for part in "${parts[@]}"; do n=$((10#$part)); (( n <= 255 )) || return 1; done
+}
+valid_host(){
+    local h="$1"
+    [[ -n "$h" && "$h" != *$'\n'* && "$h" != *$'\r'* ]] || return 1
+    valid_ipv4 "$h" && return 0
+    [[ "$h" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]
+}
+host_port(){
+    local h="$1" p="$2"
+    if [[ "$h" == *:* && "$h" != \[*\] ]]; then printf '[%s]:%s\n' "$h" "$p"; else printf '%s:%s\n' "$h" "$p"; fi
+}
 log(){ local level="$1"; shift; mkdir -p "$LOG_DIR"; echo "$(date '+%F %T') [$level] $*" >> "$MANAGER_LOG"; }
 log_info(){ log INFO "$@"; }; log_warn(){ log WARN "$@"; }; log_error(){ log ERROR "$@"; }

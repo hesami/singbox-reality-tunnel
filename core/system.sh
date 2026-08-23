@@ -34,6 +34,7 @@ open_port(){
         print_info "Port ${port}/${proto} allowed in UFW."
     elif command -v iptables >/dev/null 2>&1; then
         iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null || true
+        command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
         print_info "Port ${port}/${proto} allowed via iptables."
     else
         print_warn "No firewall manager found; verify port ${port}/${proto} manually."

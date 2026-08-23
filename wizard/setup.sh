@@ -12,7 +12,7 @@ guided_setup(){
       1) _tunnel_turkey_setup ;;
       2)
         _tunnel_iran_setup || return
-        if rssh_test_socks 10808 10 >/dev/null 2>&1; then
+        if rssh_test_socks "$(rssh_socks_port)" 10 >/dev/null 2>&1; then
             if confirm "Tunnel works. Configure the v2rayN Customer Gateway now?" y; then
                 cgw_setup
                 if systemctl is-active --quiet "$CGW_SERVICE" 2>/dev/null && confirm "Gateway is ready. Create the first customer now?" y; then users_add; fi

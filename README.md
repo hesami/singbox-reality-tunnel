@@ -1,10 +1,17 @@
-# Iran ↔ Foreign Gateway Manager — v4.2.0 Domain-First Production
+# Iran ↔ Foreign Gateway Manager — v4.3.0 Domain-First Production
 
 This is the minimal production branch for the verified architecture:
 
 `v2rayN client → Iran VLESS/REALITY → reverse-SSH SOCKS → Foreign exit → Internet`
 
 It intentionally keeps only the working production path: Reverse SSH, Customer Gateway, users/quota/expiry, subscriptions, HTTPS, health/security checks, backup/restore, and performance hardening.
+
+## v4.3.0: production hardening
+
+- Fixed custom reverse-SOCKS ports: health checks, watchdog, gateway routing, diagnostics and status now use the paired port instead of assuming `10808`.
+- Added strict host/IPv4/port validation to prevent malformed or unsafe service configuration.
+- Added SQLite busy timeouts, WAL checkpointing before backups, quota validation, atomic state writes and error propagation during customer rebuilds.
+- Added Xray release checksum verification, safer default file permissions, dynamic IPv6 link formatting and a bounded threaded subscription server.
 
 ## v4.2.0: root fixes
 

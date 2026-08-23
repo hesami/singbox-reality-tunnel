@@ -49,8 +49,8 @@ _tunnel_status(){
     print_banner; print_header "Tunnel Status"
     service_status_line "$RSSH_SERVICE" "Turkey connector service"
     service_status_line "$RSSH_SSHD_SERVICE" "Iran dedicated SSH receiver"
-    local p=10808 ip
-    [[ -f "$RSSH_ENV" ]] && p=$(awk -F= '$1=="IRAN_SOCKS_PORT"{print $2}' "$RSSH_ENV" 2>/dev/null || echo 10808)
+    local p; p=$(rssh_socks_port) ip
+    [[ -f "$RSSH_ENV" ]] && p=$(awk -F= '$1=="IRAN_SOCKS_PORT"{print $2}' "$RSSH_ENV" 2>/dev/null || true); valid_port "$p" || p=$(rssh_socks_port)
     ip=$(rssh_test_socks "$p" 10 || true)
     [[ -n "$ip" ]] && print_success "Verified Turkey egress: $ip" || print_warn "No healthy Turkey egress detected on 127.0.0.1:${p}."
     press_enter
@@ -62,7 +62,7 @@ _tunnel_rotate(){
     rssh_rotate_key || { print_error "Key rotation failed."; press_enter; return 1; }
     local turkey_ip ssh_port socks_port pair
     turkey_ip=$(rssh_public_ip 2>/dev/null || echo unknown); ssh_port=$(awk -F= '$1=="IRAN_SSH_PORT"{print $2}' "$RSSH_ENV" 2>/dev/null); socks_port=$(awk -F= '$1=="IRAN_SOCKS_PORT"{print $2}' "$RSSH_ENV" 2>/dev/null)
-    pair=$(rssh_pair_code "$turkey_ip" "${ssh_port:-22022}" "${socks_port:-10808}" "$(rssh_public_key)")
+    pair=$(rssh_pair_code "$turkey_ip" "${ssh_port:-22022}" "${socks_port:-$(rssh_socks_port)}" "$(rssh_public_key)")
     echo -e "\n  ${BOLD}New Pairing Code:${NC}\n  ${GREEN}${pair}${NC}\n"; press_enter
 }
 
@@ -91,6 +91,6 @@ tunnel_menu(){
         echo -e "  ${CYAN}6)${NC} Rotate tunnel key"
         echo -e "  ${CYAN}7)${NC} Remove tunnel components"
         echo -e "  ${CYAN}0)${NC} Back"; menu_prompt
-        case "$MENU_CHOICE" in 1)_tunnel_turkey_setup;;2)_tunnel_iran_setup;;3)_tunnel_status;;4)print_banner;print_header "Tunnel Security Audit";rssh_security_audit 10808;press_enter;;5)print_banner;print_header "TCP / BBR Tuning";print_success "Applied: $(rssh_apply_performance)";press_enter;;6)_tunnel_rotate;;7)_tunnel_remove;;0)return;;*)print_warn "Invalid choice.";sleep 1;;esac
+        case "$MENU_CHOICE" in 1)_tunnel_turkey_setup;;2)_tunnel_iran_setup;;3)_tunnel_status;;4)print_banner;print_header "Tunnel Security Audit";rssh_security_audit "$(rssh_socks_port)";press_enter;;5)print_banner;print_header "TCP / BBR Tuning";print_success "Applied: $(rssh_apply_performance)";press_enter;;6)_tunnel_rotate;;7)_tunnel_remove;;0)return;;*)print_warn "Invalid choice.";sleep 1;;esac
     done
 }

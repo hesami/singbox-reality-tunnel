@@ -20,6 +20,7 @@ CGW_DEFAULT_SUB_PORT="18080"
 # services that reject foreign-looking source IPs).
 CGW_ASSET_DIR="/usr/local/share/xray"
 CGW_GEOIP_FILE="${CGW_ASSET_DIR}/geoip.dat"
+CGW_GEOSITE_FILE="${CGW_ASSET_DIR}/geosite.dat"
 
 # Downloads + verifies v2fly's official geoip.dat (monthly-refreshed,
 # includes an "ir" country entry). Real sha256sum sidecar is published
@@ -47,11 +48,37 @@ cgw_ensure_geoip() {
     print_success "GeoIP database installed/updated (v2fly, monthly release)."
 }
 
+# Downloads + verifies v2fly/domain-list-community's dlc.dat (renamed to
+# geosite.dat, Xray's default lookup name), which includes the official
+# "category-ir" list: Iranian domains the maintainers themselves annotate
+# as "recommended to utilize direct connection for this category."
+cgw_ensure_geosite() {
+    mkdir -p "$CGW_ASSET_DIR"
+    local tmp expected actual
+    tmp=$(mktemp -d)
+    curl -fL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 \
+        -o "$tmp/dlc.dat" "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" >/dev/null 2>&1 || {
+        rm -rf "$tmp"; print_error "GeoSite database download failed."; return 1;
+    }
+    curl -fL --retry 3 --connect-timeout 15 --max-time 30 \
+        -o "$tmp/dlc.dat.sha256sum" "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat.sha256sum" >/dev/null 2>&1 || {
+        rm -rf "$tmp"; print_error "GeoSite checksum download failed."; return 1;
+    }
+    expected=$(awk '{print tolower($1)}' "$tmp/dlc.dat.sha256sum" | head -1 | tr -d '[:space:]')
+    actual=$(sha256sum "$tmp/dlc.dat" | awk '{print $1}')
+    [[ -n "$expected" && "$actual" == "$expected" ]] || {
+        rm -rf "$tmp"; print_error "GeoSite checksum verification failed."; return 1;
+    }
+    install -m 0644 "$tmp/dlc.dat" "$CGW_GEOSITE_FILE"
+    rm -rf "$tmp"
+    print_success "GeoSite database installed/updated (v2fly, category-ir included)."
+}
+
 cgw_install_geoip_cron() {
     ensure_packages cron
     systemctl enable cron &>/dev/null || true
     systemctl start  cron &>/dev/null || true
-    local marker="customer-gateway/geoip-refresh"
+    local marker="customer-gateway/geo-assets-refresh"
     local cron_line
     cron_line="0 4 1 * * /usr/bin/env bash -c '\
 tmp=\$(mktemp -d); \
@@ -60,15 +87,20 @@ curl -fsL --retry 3 --connect-timeout 15 --max-time 30 -o \"\$tmp/g.sha\" https:
 exp=\$(awk \"{print tolower(\\\$1)}\" \"\$tmp/g.sha\" | head -1) && \
 act=\$(sha256sum \"\$tmp/g.dat\" | awk \"{print \\\$1}\") && \
 [ \"\$exp\" = \"\$act\" ] && install -m 0644 \"\$tmp/g.dat\" ${CGW_GEOIP_FILE}; \
+curl -fsL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 -o \"\$tmp/s.dat\" https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat && \
+curl -fsL --retry 3 --connect-timeout 15 --max-time 30 -o \"\$tmp/s.sha\" https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat.sha256sum && \
+exp2=\$(awk \"{print tolower(\\\$1)}\" \"\$tmp/s.sha\" | head -1) && \
+act2=\$(sha256sum \"\$tmp/s.dat\" | awk \"{print \\\$1}\") && \
+[ \"\$exp2\" = \"\$act2\" ] && install -m 0644 \"\$tmp/s.dat\" ${CGW_GEOSITE_FILE}; \
 rm -rf \"\$tmp\"' >/dev/null 2>&1 # ${marker}"
     { crontab -l 2>/dev/null || true; } | { grep -vF "$marker" || true; } > /tmp/geoip_cron.tmp
     echo "$cron_line" >> /tmp/geoip_cron.tmp
     if crontab /tmp/geoip_cron.tmp; then
         rm -f /tmp/geoip_cron.tmp
-        print_success "GeoIP monthly auto-refresh cron installed."
+        print_success "GeoIP/GeoSite monthly auto-refresh cron installed."
     else
         rm -f /tmp/geoip_cron.tmp
-        print_error "Could not install GeoIP refresh cron (is 'cron' installed and running?)."
+        print_error "Could not install geo-asset refresh cron (is 'cron' installed and running?)."
     fi
 }
 
@@ -79,10 +111,11 @@ cgw_toggle_bypass_ir() {
         cgw_state_set bypass_ir 0
         print_info "Domestic (Iran) bypass disabled. All traffic will route via Turkey again."
     else
-        [[ -s "$CGW_GEOIP_FILE" ]] || { cgw_ensure_geoip || { press_enter; return 1; }; }
+        [[ -s "$CGW_GEOIP_FILE" ]]   || { cgw_ensure_geoip   || { press_enter; return 1; }; }
+        [[ -s "$CGW_GEOSITE_FILE" ]] || { cgw_ensure_geosite || { press_enter; return 1; }; }
         cgw_install_geoip_cron
         cgw_state_set bypass_ir 1
-        print_success "Domestic (Iran) bypass enabled. Iran-IP destinations will exit locally, not via Turkey."
+        print_success "Domestic (Iran) bypass enabled. Iran IPs and Iranian domains (geosite:category-ir) will exit locally, not via Turkey."
     fi
     cgw_rebuild_if_installed
     print_info "Gateway runtime rebuilt with the new routing rule."
@@ -199,6 +232,7 @@ CFG='/etc/customer-gateway/xray.json'
 XRAY='/usr/local/bin/xray'
 SERVICE='customer-gateway.service'
 GEOIP='/usr/local/share/xray/geoip.dat'
+GEOSITE='/usr/local/share/xray/geosite.dat'
 if not os.path.exists(DB) or not os.path.exists(STATE): sys.exit(0)
 state=json.load(open(STATE))
 conn=sqlite3.connect(DB); conn.row_factory=sqlite3.Row
@@ -218,12 +252,14 @@ def active(r):
     if q>0 and int(r['used_bytes'] or 0)>=int(q*1024**3): return False
     return True
 users=[{'id':r['uuid'],'level':0,'email':r['uuid']} for r in rows if active(r)]
-# Domestic (Iran) bypass: only add the geoip:ir rule if the operator has
-# turned it on AND the geoip database is actually present — referencing a
-# missing asset would make Xray refuse to start.
-bypass_ir = str(state.get('bypass_ir','')) == '1' and os.path.exists(GEOIP)
+# Domestic (Iran) bypass: only add geoip:ir / geosite:category-ir rules if
+# the operator turned this on AND the matching database is actually present
+# — referencing a missing asset would make Xray refuse to start.
+bypass_ir = str(state.get('bypass_ir','')) == '1'
 routing_rules=[]
-if bypass_ir:
+if bypass_ir and os.path.exists(GEOSITE):
+    routing_rules.append({'type':'field','inboundTag':['customer-in'],'domain':['geosite:category-ir'],'outboundTag':'direct'})
+if bypass_ir and os.path.exists(GEOIP):
     routing_rules.append({'type':'field','inboundTag':['customer-in'],'ip':['geoip:ir'],'outboundTag':'direct'})
 routing_rules.append({'type':'field','inboundTag':['customer-in'],'outboundTag':'turkey-exit'})
 config={
@@ -1050,9 +1086,9 @@ cgw_menu(){
         echo -e "  ${CYAN}4)${NC} Security audit"
         local bstat; bstat=$(cgw_state_get bypass_ir 2>/dev/null || true)
         if [[ "$bstat" == "1" ]]; then
-            echo -e "  ${CYAN}5)${NC} Route Iran traffic directly ${GREEN}[ON]${NC} ${DIM}(toggle off)${NC}"
+            echo -e "  ${CYAN}5)${NC} Bypass Iran IPs/domains ${GREEN}[ON]${NC} ${DIM}(toggle off)${NC}"
         else
-            echo -e "  ${CYAN}5)${NC} Route Iran traffic directly ${DIM}[OFF] (toggle on)${NC}"
+            echo -e "  ${CYAN}5)${NC} Bypass Iran IPs/domains ${DIM}[OFF] (toggle on)${NC}"
         fi
         echo -e "  ${CYAN}6)${NC} Remove gateway"
         echo -e "  ${CYAN}0)${NC} Back"; menu_prompt

@@ -10,15 +10,34 @@ overall_health(){
     role=$(infer_role); ip=$(get_public_ip 2>/dev/null || echo unknown); users=$(db_user_count 2>/dev/null || echo 0); enabled=$(db_enabled_count 2>/dev/null || echo 0)
     echo -e "  Role                    : ${CYAN}${role}${NC}"
     echo -e "  Public IP               : ${CYAN}${ip}${NC}"
-    echo -e "  Customers               : ${CYAN}${users}${NC} total / ${CYAN}${enabled}${NC} enabled\n"
+    echo -e "  Customers               : ${CYAN}${users}${NC} total / ${CYAN}${enabled}${NC} enabled"
+    local cores load1 ram_total ram_used cc qdisc
+    cores=$(nproc 2>/dev/null || echo '?')
+    load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo '?')
+    ram_total=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    ram_used=$(free -m 2>/dev/null | awk '/^Mem:/{print $3}')
+    cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')
+    qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')
+    echo -e "  CPU / load (1min)       : ${CYAN}${cores} cores${NC} / ${CYAN}${load1}${NC} ${DIM}(sustained load near/above core count = CPU-bound, not a config issue)${NC}"
+    echo -e "  RAM used/total          : ${CYAN}${ram_used:-?}${NC}/${CYAN}${ram_total:-?} MB${NC}"
+    echo -e "  TCP tuning              : ${CYAN}${cc}${NC} / ${CYAN}${qdisc}${NC}"
+    echo
     service_status_line "$RSSH_SERVICE" "Turkey reverse connector"
     service_status_line "$RSSH_SSHD_SERVICE" "Iran dedicated SSH receiver"
     service_status_line "$CGW_SERVICE" "Customer VLESS gateway"
     service_status_line "$CGW_SUB_SERVICE" "Subscription service"
     service_status_line customer-gateway-watchdog.timer "Gateway kill-switch"
     echo
+    local latency_ms=""
     exit=$(rssh_test_socks "$(rssh_socks_port)" 10 || true)
-    [[ -n "$exit" ]] && print_success "End-to-end Turkey exit works: $exit" || print_warn "No verified Turkey exit on 127.0.0.1:$(rssh_socks_port)."
+    if [[ -n "$exit" ]]; then
+        latency_ms=$(curl -4kso /dev/null -w '%{time_connect}' --max-time 6 --connect-timeout 5 \
+            --socks5 "127.0.0.1:$(rssh_socks_port)" https://1.1.1.1/ 2>/dev/null || true)
+        [[ -n "$latency_ms" ]] && latency_ms=" (TCP connect: $(awk -v t="$latency_ms" 'BEGIN{printf "%.0f", t*1000}') ms)"
+        print_success "End-to-end Turkey exit works: ${exit}${latency_ms}"
+    else
+        print_warn "No verified Turkey exit on 127.0.0.1:$(rssh_socks_port)."
+    fi
     if [[ -s "$CGW_STATE" ]]; then
         echo -e "  Client endpoint         : ${CYAN}$(cgw_client_host):$(cgw_state_get port)${NC}"
         echo -e "  Subscription endpoint   : ${CYAN}$(cgw_state_get sub_scheme)://$(cgw_state_get sub_host):$(cgw_state_get sub_port)/sub/<token>${NC}"

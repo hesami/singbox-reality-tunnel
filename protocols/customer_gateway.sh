@@ -74,25 +74,45 @@ cgw_ensure_geosite() {
     print_success "GeoSite database installed/updated (v2fly, category-ir included)."
 }
 
+CGW_GEO_REFRESH_SCRIPT="/etc/customer-gateway/refresh_geo_assets.sh"
+
+cgw_write_geo_refresh_script() {
+    mkdir -p /etc/customer-gateway
+    cat > "$CGW_GEO_REFRESH_SCRIPT" << SCRIPT
+#!/usr/bin/env bash
+# Monthly refresh of geoip.dat / geosite.dat, each checked against the
+# real sha256sum published alongside it. Installed by cgw_install_geoip_cron.
+set -uo pipefail
+mkdir -p "${CGW_ASSET_DIR}"
+tmp=\$(mktemp -d)
+trap 'rm -rf "\$tmp"' EXIT
+
+curl -fsL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 \\
+    -o "\$tmp/g.dat" "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat" &&
+curl -fsL --retry 3 --connect-timeout 15 --max-time 30 \\
+    -o "\$tmp/g.sha" "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat.sha256sum" &&
+exp=\$(awk '{print tolower(\$1)}' "\$tmp/g.sha" | head -1) &&
+act=\$(sha256sum "\$tmp/g.dat" | awk '{print \$1}') &&
+[ "\$exp" = "\$act" ] && install -m 0644 "\$tmp/g.dat" "${CGW_GEOIP_FILE}"
+
+curl -fsL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 \\
+    -o "\$tmp/s.dat" "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat" &&
+curl -fsL --retry 3 --connect-timeout 15 --max-time 30 \\
+    -o "\$tmp/s.sha" "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat.sha256sum" &&
+exp2=\$(awk '{print tolower(\$1)}' "\$tmp/s.sha" | head -1) &&
+act2=\$(sha256sum "\$tmp/s.dat" | awk '{print \$1}') &&
+[ "\$exp2" = "\$act2" ] && install -m 0644 "\$tmp/s.dat" "${CGW_GEOSITE_FILE}"
+SCRIPT
+    chmod 0700 "$CGW_GEO_REFRESH_SCRIPT"
+}
+
 cgw_install_geoip_cron() {
     ensure_packages cron
     systemctl enable cron &>/dev/null || true
     systemctl start  cron &>/dev/null || true
+    cgw_write_geo_refresh_script
     local marker="customer-gateway/geo-assets-refresh"
-    local cron_line
-    cron_line="0 4 1 * * /usr/bin/env bash -c '\
-tmp=\$(mktemp -d); \
-curl -fsL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 -o \"\$tmp/g.dat\" https://github.com/v2fly/geoip/releases/latest/download/geoip.dat && \
-curl -fsL --retry 3 --connect-timeout 15 --max-time 30 -o \"\$tmp/g.sha\" https://github.com/v2fly/geoip/releases/latest/download/geoip.dat.sha256sum && \
-exp=\$(awk \"{print tolower(\\\$1)}\" \"\$tmp/g.sha\" | head -1) && \
-act=\$(sha256sum \"\$tmp/g.dat\" | awk \"{print \\\$1}\") && \
-[ \"\$exp\" = \"\$act\" ] && install -m 0644 \"\$tmp/g.dat\" ${CGW_GEOIP_FILE}; \
-curl -fsL --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 60 -o \"\$tmp/s.dat\" https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat && \
-curl -fsL --retry 3 --connect-timeout 15 --max-time 30 -o \"\$tmp/s.sha\" https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat.sha256sum && \
-exp2=\$(awk \"{print tolower(\\\$1)}\" \"\$tmp/s.sha\" | head -1) && \
-act2=\$(sha256sum \"\$tmp/s.dat\" | awk \"{print \\\$1}\") && \
-[ \"\$exp2\" = \"\$act2\" ] && install -m 0644 \"\$tmp/s.dat\" ${CGW_GEOSITE_FILE}; \
-rm -rf \"\$tmp\"' >/dev/null 2>&1 # ${marker}"
+    local cron_line="0 4 1 * * ${CGW_GEO_REFRESH_SCRIPT} >/dev/null 2>&1 # ${marker}"
     { crontab -l 2>/dev/null || true; } | { grep -vF "$marker" || true; } > /tmp/geoip_cron.tmp
     echo "$cron_line" >> /tmp/geoip_cron.tmp
     if crontab /tmp/geoip_cron.tmp; then
@@ -100,6 +120,7 @@ rm -rf \"\$tmp\"' >/dev/null 2>&1 # ${marker}"
         print_success "GeoIP/GeoSite monthly auto-refresh cron installed."
     else
         rm -f /tmp/geoip_cron.tmp
+
         print_error "Could not install geo-asset refresh cron (is 'cron' installed and running?)."
     fi
 }
